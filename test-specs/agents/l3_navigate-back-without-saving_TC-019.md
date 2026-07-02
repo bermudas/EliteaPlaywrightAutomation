@@ -27,7 +27,7 @@
 ### Must Clean Up (in teardown)
 - None. Confirmed via two independent channels that no agent was created:
   1. Network: `GET .../search_options/prompt_lib/{ownerId}?query={generatedName}&...&entities[]=application...` → response `{"application": {"total": 0, "rows": []}, ...}`
-  2. UI: filtering the agents list by the generated name renders the empty state (`"No agents yet"` / `"Create your first agent to get started..."`)
+  2. UI: filtering the agents list by the generated name renders the empty state — **[Implementer amendment, 2026-07-02]** re-verified live during automation and corrected: the search-results empty state actually renders `"No Agents Match"` (a `listitem` inside the search dropdown's results panel, alongside a sibling `"No Tags Match"` for the Tags section), the same text TC-015's AFS already documented for the identical `search_options` empty-result scenario. `"No agents yet" / "Create your first agent to get started..."` (this AFS's original claim) was not reproduced against the live app and appears to be a different empty state (a zero-agents-in-account state, not a zero-search-results state) — reverse-masking guard applies, asserting the live-verified `"No Agents Match"` text instead of the stale claim. See `tests/pages/cardGridList.page.ts`'s `noAgentsMatchText()`.
   - Case's own Teardown ("None required — no agent was created") is confirmed accurate.
 
 ## Test Steps
@@ -55,7 +55,7 @@
     a. Type the generated name into `getByRole('textbox', {name:'search'})`; wait for the `GET .../search_options/...&entities[]=application...` response.
        - **Verify**: response body `application.total === 0` (primary, race-free assertion — see Network Behavior)
     b. Observe the filtered card list.
-       - **Verify**: empty state `"No agents yet"` renders; no card with the generated name exists
+       - **Verify**: empty state `"No Agents Match"` renders (corrected 2026-07-02 per implementer live re-verification — see § Test Data Must Clean Up amendment; original AFS text said `"No agents yet"`); no card with the generated name exists
 12. (Informational only — see Known Defects) Clear the search box and re-read the "Agents: N" badge.
     - **Note**: do not hard-assert exact equality to `initial_count` when this suite runs concurrently with other test sessions against the same shared account — see environmental note below.
 
@@ -63,7 +63,7 @@
 - Clicking the Back arrow on a dirty create-agent form shows a native-feeling MUI confirmation dialog ("Warning" / "There are unsaved changes. Are you sure you want to leave?" / Cancel / Confirm) before allowing navigation away
 - Clicking "Confirm" discards the in-progress form and returns to `/app/agents/all` (with a `viewMode=owner` query param carried over)
 - No `POST` create-agent request fires at any point in the flow (confirmed via full network log for the session — none observed)
-- The generated agent name never appears anywhere in the account: `search_options` API returns `application.total: 0`, and the UI's own "No agents yet" filtered empty state confirms it
+- The generated agent name never appears anywhere in the account: `search_options` API returns `application.total: 0`, and the UI's own "No Agents Match" filtered empty state confirms it (corrected 2026-07-02, see § Test Data Must Clean Up amendment)
 - No console errors or warnings at any point (checked via `console error`/`console warning` — 0/0 across the whole run)
 - No teardown/cleanup required — nothing was persisted
 
