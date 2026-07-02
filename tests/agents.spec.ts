@@ -8,7 +8,7 @@ import {
 import { env } from './fixtures/env';
 import { uniqueAgentName } from './fixtures/testData';
 import { CardGridListPage } from './pages/cardGridList.page';
-import { AgentFormPage, dismissAnnouncementBanner } from './pages/agentForm.page';
+import { EntityFormPage, dismissAnnouncementBanner } from './pages/entityForm.page';
 
 /**
  * @agents suite -- TC-010 through TC-019, implemented from the AFS files at
@@ -67,7 +67,7 @@ const test = base.extend<
       await page.waitForURL(/\/app\/chat/);
       // Dismiss before capturing storageState -- if the banner's dismissal
       // is localStorage-backed, every test in this file inherits the
-      // dismissed state; if it isn't, each mutating AgentFormPage method
+      // dismissed state; if it isn't, each mutating EntityFormPage method
       // dismisses it defensively anyway (GH#42).
       await dismissAnnouncementBanner(page);
       const storageState = await context.storageState();
@@ -123,7 +123,7 @@ test.describe('@agents', () => {
   test('TC-010: create agent with minimal required fields', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     // TC-010's own AFS specifies the case's exact literal template here --
     // it fits exactly at the 32-char Name cap (GH#27) and the AFS
     // explicitly says to use it verbatim, not a shortened prefix (unlike
@@ -195,7 +195,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup: delete the created agent', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(agentName);
+          await form.deleteEntity(agentName);
           await expect(page).toHaveURL(/\/app\/agents\/all/);
         });
       }
@@ -205,7 +205,7 @@ test.describe('@agents', () => {
   test('TC-011: create agent with all fields filled', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const data = {
       name: uniqueAgentName('TC011'),
       description: 'Full test agent with all fields populated',
@@ -317,7 +317,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup: delete the created agent', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(data.name);
+          await form.deleteEntity(data.name);
           await expect(page).toHaveURL(/\/app\/agents\/all/);
         });
       }
@@ -327,7 +327,7 @@ test.describe('@agents', () => {
   test('TC-012: edit existing agent', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const originalName = uniqueAgentName('TC012');
     const updatedName = `${originalName}_UPDATED`;
     const originalDescription = 'Original description';
@@ -412,7 +412,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup: delete the fixture agent (current name is the updated one)', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(updatedName);
+          await form.deleteEntity(updatedName);
           await expect(page).toHaveURL(/\/app\/agents\/all/);
         });
       }
@@ -422,7 +422,7 @@ test.describe('@agents', () => {
   test('TC-013: delete agent with confirmation', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const agentName = uniqueAgentName('TC013');
     let agentId: number | undefined;
 
@@ -499,7 +499,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup fallback: delete the fixture (test failed before its own delete step)', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(agentName);
+          await form.deleteEntity(agentName);
         });
       }
     }
@@ -508,7 +508,7 @@ test.describe('@agents', () => {
   test('TC-014: form validation for required fields', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const agentName = uniqueAgentName('TC014');
     const description = 'Description for validation test';
 
@@ -592,7 +592,7 @@ test.describe('@agents', () => {
   test('TC-015: cancel button discards changes', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const agentName = uniqueAgentName('TC015');
     let initialCount = 0;
 
@@ -659,7 +659,7 @@ test.describe('@agents', () => {
 
   test('TC-016: agent detail page displays correct data', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const data = {
       name: uniqueAgentName('TC016'),
       description: 'Agent for detail page verification',
@@ -733,7 +733,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup: delete the fixture agent', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(data.name);
+          await form.deleteEntity(data.name);
           await expect(page).toHaveURL(/\/app\/agents\/all/);
         });
       }
@@ -743,7 +743,7 @@ test.describe('@agents', () => {
   test('TC-017: tags field multi-select functionality', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const agentName = uniqueAgentName('TC017');
     let agentId: number | undefined;
 
@@ -872,7 +872,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup: delete the created agent', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(agentName);
+          await form.deleteEntity(agentName);
           await expect(page).toHaveURL(/\/app\/agents\/all/);
         });
       }
@@ -882,7 +882,7 @@ test.describe('@agents', () => {
   test('TC-018: step limit field value validation', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const agentName = uniqueAgentName('TC018');
     const description = 'Agent for testing step limit values';
     let agentId: number | undefined;
@@ -976,7 +976,7 @@ test.describe('@agents', () => {
       if (agentId !== undefined) {
         await test.step('Cleanup: delete the fixture agent', async () => {
           await page.goto(`${env.BASE_URL}/app/agents/all/${agentId}?viewMode=owner`);
-          await form.deleteAgent(agentName);
+          await form.deleteEntity(agentName);
           await expect(page).toHaveURL(/\/app\/agents\/all/);
         });
       }
@@ -986,7 +986,7 @@ test.describe('@agents', () => {
   test('TC-019: navigate back without saving shows confirmation', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
     const agentsList = new CardGridListPage(page);
-    const form = new AgentFormPage(page);
+    const form = new EntityFormPage(page, 'agent');
     const agentName = uniqueAgentName('TC019');
     let initialCount = 0;
 

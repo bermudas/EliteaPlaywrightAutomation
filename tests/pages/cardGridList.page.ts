@@ -179,4 +179,39 @@ export class CardGridListPage {
   noAgentsMatchText(): Locator {
     return this.page.getByText('No Agents Match');
   }
+
+  /**
+   * [Added during the `pipelines` module batch, TC-025/TC-029] "Pipelines: N"
+   * footer badge -- same pattern as `totalCountBadge()`/`totalCount()`
+   * above, just for the Pipelines list's own label. Kept as separate
+   * methods rather than parametrizing the existing Agents-labelled ones --
+   * Hard Rule 3 additive-only discipline on this already-merged,
+   * multi-caller shared page object (`tests/agents.spec.ts`'s TC-015/TC-019
+   * already depend on `totalCountBadge()`/`totalCount()` exactly as
+   * written).
+   */
+  pipelinesTotalCountBadge(): Locator {
+    return this.page.getByText(/^Pipelines:\s*\d+/);
+  }
+
+  async pipelinesTotalCount(): Promise<number> {
+    const text = (await this.pipelinesTotalCountBadge().textContent()) ?? '';
+    const match = text.match(/(\d+)/);
+    if (!match) {
+      throw new Error(`Expected "Pipelines: N" badge text to contain a number, got: "${text}"`);
+    }
+    return Number(match[1]);
+  }
+
+  /**
+   * [Added during the `pipelines` module batch, TC-025/TC-029] Literal
+   * empty-state text when a search matches zero pipelines -- confirmed live,
+   * same UX pattern as `noAgentsMatchText()` above but for the Pipelines
+   * list's search box (renders inside the search-suggestion dropdown, not
+   * the main card grid -- the grid does not live-filter on typed input,
+   * confirmed by TC-025).
+   */
+  noPipelinesMatchText(): Locator {
+    return this.page.getByText('No Pipelines Match');
+  }
 }
