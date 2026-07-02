@@ -23,8 +23,23 @@ function required(key: string): string {
   return value;
 }
 
+/**
+ * Every AFS in this suite (and the existing bootstrap.spec.ts) writes
+ * navigation targets as template literals: `${env.BASE_URL}/app/chat/`.
+ * `.env`/`.env.example` both store BASE_URL WITH a trailing slash
+ * (`https://next.elitea.ai/`), which produces a double slash
+ * (`https://next.elitea.ai//app/chat/`) once concatenated with a leading-
+ * slash path. Root-caused during @smoke implementation (2026-07-02, TC-002):
+ * the double-slash URL 404s when navigated to *while authenticated* (the
+ * SPA's client-side router does not normalize it) even though the identical
+ * double-slash URL redirects correctly *while logged out* (that path is a
+ * top-level auth redirect that happens to tolerate it) -- so the pre-existing
+ * bootstrap.spec.ts (logged-out only) never surfaced this. Stripping the
+ * trailing slash once, here, fixes every call site without requiring each
+ * one to remember not to add its own leading slash.
+ */
 export const env = {
-  BASE_URL: required('BASE_URL'),
+  BASE_URL: required('BASE_URL').replace(/\/+$/, ''),
   ELITEA_EMAIL: required('ELITEA_EMAIL'),
   ELITEA_PASSWORD: required('ELITEA_PASSWORD'),
 };
