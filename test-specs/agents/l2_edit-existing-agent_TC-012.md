@@ -115,7 +115,7 @@
 | Expected Final State: name/description updated in both detail + list views, no errors, URL is `/app/agents/all` | full end state | steps 14,15,18 | see above | asserted |
 | Teardown: navigate to updated-name agent detail page | detail page loads | Teardown step 1 | direct navigation via captured `{id}` | asserted |
 | Teardown: click 3-dot menu, "Delete agent" | delete dialog opens | Teardown step 2 | dialog `[role="dialog"]` heading "Delete confirmation" | asserted *(clarification: menu button has no accessible name — DOM id observed as literal `undefined-action`; see § Concrete Handles)* |
-| Teardown: confirm deletion by clicking "Confirm" | agent deleted | Teardown step 3 | `DELETE .../application/prompt_lib/21/{id}` → 204 | asserted *(clarification: live dialog has no "Confirm" button — it requires typing the exact agent name into a `Name` textbox to enable a `Delete` button; same dialog already flagged under GH#32 for TC-010, corroborated here — see GH#34)* |
+| Teardown: confirm deletion by clicking "Confirm" | agent deleted | Teardown step 3 | `DELETE .../application/prompt_lib/21/{id}` → 204 | asserted *(clarification: live dialog has no "Confirm" button — it requires typing the exact agent name into a `Name` textbox to enable a `Delete` button; same dialog already canonically tracked under GH#28 (originally filed from TC-011, corroborated by TC-010/TC-016/TC-017/TC-012) — see GH#34)* |
 | Teardown: verify agent removed from list | agent gone from list | Teardown step 4 | re-navigate to list, `cards.filter({hasText: updatedName})` count 0 | asserted |
 
 **Axis 2 — Analyst additions**
@@ -158,7 +158,7 @@
 | Description field (create + edit forms) | `getByRole('textbox', { name: 'Description *' })` | `textarea[name="description"]` |
 | Save button — **create** page | `getByRole('button', { name: 'Save' })` | — *(safe here: create page only has Save/Cancel, no "Save As Version" to collide with)* |
 | Save button — **edit/detail** page | `getByTestId('agent-save-button')` | `getByRole('button', { name: 'Save', exact: true })` — confirmed via live `.count() === 1` check; do **not** use non-exact `name: 'Save'` here, it strict-mode-violates against "Save As Version" (GH#34) |
-| Agent overflow (⋮) menu button | `page.locator('#undefined-action')` — **flag**: this is the element's literal live DOM `id`, not a placeholder in this doc; likely an unintended default-id fallback in the product's menu-button component (harmless, but recommend the product team give it a real id/aria-label) | position-based: the icon-only button following Save/Save As Version/Discard in the detail-page toolbar |
+| Agent overflow (⋮) menu button | `page.locator('#undefined-action')` — **flag**: this is the element's literal live DOM `id`, not a placeholder in this doc; a broken template interpolation in the product's menu-button component, confirmed on multiple agent ids (253, 271) — see [GH#39](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/39) for the full ARIA-wiring writeup (id-collision risk, dialog's broken `aria-labelledby`, unnamed confirm-input) | position-based: the icon-only button following Save/Save As Version/Discard in the detail-page toolbar |
 | "Delete agent" menu item | `getByRole('menuitem', { name: 'Delete agent' })` | — |
 | Delete-confirm dialog | `getByRole('dialog')` (heading text "Delete confirmation") | — |
 | Delete-confirm name textbox | `getByRole('dialog').getByRole('textbox')` | — |
@@ -176,10 +176,11 @@
   edit → save → persist → verify → delete) works correctly end-to-end,
   confirmed via both client-state and full-reload (server-side) checks,
   with zero console errors and correct 2xx/204 network responses throughout.
-- **3 case-authoring clarifications filed as [GH#34](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/34)** (bundled per the project's existing case-text-drift convention — see GH#9, #10, #12, #14, #28, #30, #31, #32):
-  1. Delete-confirmation dialog requires typing the exact agent name into a `Name` textbox to enable a `Delete` button — no "Confirm" button exists as the case's Teardown states. Corroborates pre-existing [GH#32](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/32) (same dialog, originally filed from TC-010).
+- **3 case-authoring clarifications filed as [GH#34](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/34)** (bundled per the project's existing case-text-drift convention — see GH#9, #10, #12, #14, #28, #30):
+  1. Delete-confirmation dialog requires typing the exact agent name into a `Name` textbox to enable a `Delete` button — no "Confirm" button exists as the case's Teardown states. Canonically tracked under [GH#28](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/28) (originally filed from TC-011, corroborated by TC-010/TC-016/TC-017/TC-012 — note: GH#34 originally cited GH#32 for this, which was itself closed as a duplicate of GH#28 shortly after filing; corrected here and via a follow-up comment on GH#34).
   2. The Name field's 32-char `maxLength` (pre-existing [GH#27](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/27)) breaks this case's own literal naming pattern (`TEST_Agent_Edit_${timestamp}` → `..._UPDATED` would run 30–38 chars). AFS uses a shortened pattern that fits.
   3. **New**: `getByRole('button', { name: 'Save' })` strict-mode-violates on the edit/detail page (matches both "Save" and "Save As Version"); use `getByTestId('agent-save-button')` instead — confirmed present and unique.
+  4. The overflow-menu button's `id="undefined-action"` is more thoroughly documented under [GH#39](https://github.com/bermudas/EliteaPlaywrightAutomation/issues/39) (filed by TC-013's analyst) — see § Concrete Handles above.
 
 ## Blocked Steps
 None.
