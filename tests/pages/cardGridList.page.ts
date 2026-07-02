@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type Locator, type Page, type Response } from '@playwright/test';
 
 /**
  * Shared page object for the lazy-loaded card-grid list pattern used by both
@@ -32,10 +32,14 @@ import { expect, type Locator, type Page } from '@playwright/test';
 export class CardGridListPage {
   readonly panel: Locator;
   readonly cards: Locator;
+  /** Confirmed handle, established by the `agents` module batch
+   * (TC-015/TC-019) -- the list/grid page's own search box. */
+  readonly searchInput: Locator;
 
   constructor(private readonly page: Page) {
     this.panel = page.locator('#EliteACustomTabPanel');
     this.cards = this.panel.locator('.MuiCard-root');
+    this.searchInput = page.getByRole('textbox', { name: 'search' });
   }
 
   /**
@@ -97,5 +101,82 @@ export class CardGridListPage {
 
   firstCard(): Locator {
     return this.cards.first();
+  }
+
+  /**
+   * Added during the `agents` module batch (TC-012/TC-013/TC-015/TC-019) --
+   * the third+ spec needing "find/click a specific card by name," after
+   * TC-003/TC-004's count-only usage. Clicking the outer `.MuiCard-root`
+   * locator (rather than a specific inner cursor:pointer child) is
+   * confirmed live to navigate correctly -- Playwright's `.click()`
+   * dispatches at the element's center point, and the browser's own hit
+   * testing resolves to whichever inner element actually covers that
+   * point, which is the card's real click target in this app.
+   */
+  cardByName(name: string): Locator {
+    return this.cards.filter({ hasText: name });
+  }
+
+  async clickCardByName(name: string): Promise<void> {
+    await this.cardByName(name).click();
+  }
+
+  /**
+   * "Agents: N" footer badge -- same handle TC-003/PR #15 established,
+   * extracted here now that a third+ case (TC-015, TC-019) needs the
+   * parsed count, not just the raw text locator (Hard Rule 7's
+   * third-repetition threshold for extraction).
+   */
+  totalCountBadge(): Locator {
+    return this.page.getByText(/^Agents:\s*\d+/);
+  }
+
+  async totalCount(): Promise<number> {
+    const text = (await this.totalCountBadge().textContent()) ?? '';
+    const match = text.match(/(\d+)/);
+    if (!match) {
+      throw new Error(`Expected "Agents: N" badge text to contain a number, got: "${text}"`);
+    }
+    return Number(match[1]);
+  }
+
+  /**
+   * Types into the list's search box and waits for the authoritative
+   * `GET .../search_options/prompt_lib/{ownerId}?query=...` response
+   * (confirmed live, TC-015/TC-019 -- debounced ~1s from the keystroke).
+   * Callers use the returned response body's `application.total`/`.rows`
+   * as a race-free, concurrency-immune "does an agent with this name
+   * exist" check -- stronger than a DOM card-count/badge diff in this
+   * shared, concurrently-mutated test account.
+   *
+   * Matches the response's own `query=` param against the search string
+   * (not just any `search_options` response) -- this endpoint also fires
+   * with an EMPTY query on page mount/re-mount, and without this check a
+   * `waitForResponse` racing against that earlier in-flight request would
+   * resolve to the wrong response (confirmed live: an implementer-run
+   * without this filter matched the mount-time full-account response,
+   * `application.total: 213`, instead of the actual zero-result search).
+   */
+  async searchAndAwaitResults(query: string): Promise<Response> {
+    const [response] = await Promise.all([
+      this.page.waitForResponse((r) => {
+        if (!r.url().includes('/search_options/prompt_lib/') || r.status() !== 200) return false;
+        const urlQuery = new URL(r.url()).searchParams.get('query');
+        return urlQuery === query;
+      }),
+      this.searchInput.fill(query),
+    ]);
+    return response;
+  }
+
+  /**
+   * Confirmed live (2026-07-02, implementer Phase 2 exploration) as the
+   * literal empty-state text when a search matches zero agents -- see
+   * `tests/agents.spec.ts` TC-019 for a case where the AFS's own stated
+   * text ("No agents yet") did not match this live-verified contract and
+   * was corrected via a `docs(afs)` amendment (reverse-masking guard).
+   */
+  noAgentsMatchText(): Locator {
+    return this.page.getByText('No Agents Match');
   }
 }
