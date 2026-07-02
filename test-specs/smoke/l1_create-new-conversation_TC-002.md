@@ -54,7 +54,7 @@
 6. Click the send button: `getByTestId('chat-send-button')`.
    - **Verify**: button was enabled (not disabled) immediately before the click.
 7. Wait for URL to match `${BASE_URL}/app/chat/{id}` (`page.waitForURL(/\/app\/chat\/\d+/)`) — this is where the new conversation id actually appears (observed: id `22`, distinct from the pre-existing id `21`).
-   - **Verify**: `${TEST_MESSAGE}` appears as a right-aligned user message, attributed to the logged-in user ("Alita Yoko"), timestamped "less than a minute ago".
+   - **Verify**: `${TEST_MESSAGE}` appears in a `[data-testid="chat-message-item"]` row, attributed to the logged-in user ("Alita Yoko"), timestamped "less than a minute ago". *(Corrected — see Implementer Amendment below: the case's "right-aligned" wording is the same stale-case-text finding TC-001's AFS already filed as GH#11 — live UI renders a full-width transcript row, not a right-aligned bubble. Not re-filed as a second ticket; GH#11 already covers this exact UI element across both cases.)*
 8. Wait for the AI response block: `getByRole('button', { name: /^Thought for \d+ secs?$/ })` visible.
    - **Verify**: response text is visible under the "Thought for N sec(s)" heading (observed: "Hello! How can I help you today?").
    - **Verify (added)**: no console errors were logged during steps 3–8; all conversation-related XHR calls (`POST .../conversations/...`, `PATCH .../entity_settings/...`, `PUT .../conversation/...`, `POST .../select_conversation/...`) returned 2xx.
@@ -86,7 +86,7 @@
 | 5 Verify message input textarea visible | Textarea ready for input | step 4 | `step 4`: `chat-input` textarea visible/active | asserted |
 | 6 Verify message list empty or welcome message | Clean conversation state | step 4 | `step 4`: "Hello, Alita!" welcome text, no prior messages | asserted |
 | 7 Type "New conversation test" | Text appears in input | step 5 | `step 5`: textarea value assertion | asserted |
-| 8 Click Send button (speech bubble icon) | Message sent, right-aligned user bubble | step 6–7 | `step 7`: user message visible, right-aligned | asserted *(icon is a custom send/paper-plane-style SVG, not literally a speech bubble — minor wording drift, folded into the same clarification as steps 3–4, not filed separately)* |
+| 8 Click Send button (speech bubble icon) | Message sent, right-aligned user bubble | step 6–7 | `step 7`: user message visible in a `[data-testid="chat-message-item"]` row | **clarification** *(icon is a custom send/paper-plane-style SVG, not literally a speech bubble — minor wording drift, folded into the same clarification as steps 3–4, not filed separately. The "right-aligned user bubble" claim specifically is the same stale-case-text finding TC-001's AFS filed as GH#11 — live UI is a full-width transcript row, not a right-aligned bubble; message send/persist/attribution is fully asserted, only the positional claim is stale. Not re-filed as a second ticket — see Implementer Amendment.)* |
 | 9 Wait for streaming indicator ("Thought for N sec") | Indicator visible | step 8 | `step 8`: "Thought for 1 sec" button/heading visible | asserted |
 | Expected Final State: URL matches `/app/chat/{id}` | — | step 7 | `step 7` | asserted |
 | Expected Final State: user message visible | — | step 7 | `step 7` | asserted |
@@ -182,3 +182,7 @@ Re-verified all Concrete Handles live via `playwright-cli` before writing `tests
 2. **Sidebar "Today" entry timing (step 9)** — confirmed live that the new conversation's sidebar entry passes through a transient `"Naming"` placeholder (an async, AI-generated-title step) before settling on the final name. Observed once to take **~30-40 seconds** to resolve — well beyond this AFS's own "no fixed sleep" framing suggests. Implementation waits on `getByRole('button', { name: TEST_MESSAGE, exact: true })` with a 45s timeout (`expect(...).toBeVisible({ timeout: 45_000 })`) rather than a shorter default, still a pure condition-wait (no `waitForTimeout`), just a wider ceiling than the case's own "3 seconds" framing would suggest.
 
 No scope change — both are technique-level (the *how*: handle stability, wait ceiling), not coverage changes. See `tests/smoke.spec.ts` TC-002 for the implementation.
+
+## Reviewer Correction (2026-07-02, PR #15 R1)
+
+This AFS's own Test Steps §7 and Coverage Map row 8 still asserted the case's literal "right-aligned user message" wording, contradicting TC-001's own AFS finding (GH#11: live UI renders a full-width transcript row, not a right-aligned bubble) — the same chat-message-row UI element both cases exercise. The implementation was already correct (never asserted alignment), but the AFS text wasn't reconciled, leaving a Coverage Map row claiming "asserted...right-aligned" with no clarification trail. Corrected above: Test Steps §7's Verify text and Coverage Map row 8's disposition now read `clarification`, cross-referencing GH#11 rather than re-filing a duplicate ticket for the same underlying UI fact.

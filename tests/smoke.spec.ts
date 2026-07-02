@@ -190,6 +190,20 @@ test.describe('@smoke', () => {
         // ("not stable enough to recommend") -- assert on the row's own
         // `hasText` contract instead, matching that guidance directly.
         await expect(sentMessage).toContainText('Alita Yoko');
+
+        // AFS Axis 2: "Step 11 soft-asserts an AI response eventually
+        // appears -- confirms the full round-trip works end-to-end, even
+        // though the case marks this optional." Reuses the same "Thought
+        // for N sec" wait pattern TC-002 already established for this same
+        // observable. `.last()` for the same reason as `sentMessage` above
+        // -- this persisted conversation can carry prior AI-response rows
+        // from earlier runs. `expect.soft()` because the original case
+        // marks this step optional -- a slow/absent AI response here must
+        // not fail the rest of this test or block TC-002..005, which don't
+        // depend on it.
+        await expect
+          .soft(page.getByRole('button', { name: /^Thought for \d+ secs?$/ }).last())
+          .toBeVisible({ timeout: 30_000 });
       });
 
       expect(console_.errors, 'no console errors during login + send flow').toEqual([]);
@@ -352,8 +366,30 @@ test.describe('@smoke', () => {
 
     try {
       await test.step('1. Navigate to the pipelines list', async () => {
-        await page.goto(`${env.BASE_URL}/app/pipelines/all`);
+        // AFS Axis 2: "Asserts response author identity (authors[0].email)
+        // matches ${TEST_USER} on first load -- cheap, free verification...
+        // directly relevant since this session discovered the session may
+        // be inherited/shared." Capture the real list-fetch response
+        // (excluding the companion `limit=1` count-only call the AFS's own
+        // Network Behavior section documents firing alongside it) instead
+        // of issuing a second request just to check identity.
+        const [listResponse] = await Promise.all([
+          page.waitForResponse(
+            (response) =>
+              response.url().includes('/applications/prompt_lib/') &&
+              response.url().includes('agents_type=pipeline') &&
+              response.url().includes('limit=20') &&
+              response.status() === 200,
+          ),
+          page.goto(`${env.BASE_URL}/app/pipelines/all`),
+        ]);
         await expect(page).toHaveURL(/\/app\/pipelines\/all/);
+
+        const body = await listResponse.json();
+        expect(
+          body.rows?.[0]?.authors?.[0]?.email,
+          'first pipeline row author email should match the authenticated test user',
+        ).toBe(env.ELITEA_EMAIL);
       });
 
       await test.step('2. Wait for the loading indicator to clear (condition wait, not "wait 3s")', async () => {
