@@ -1,0 +1,14 @@
+{
+  "name": "elitea-playwright-automation",
+  "version": "1.0.0",
+  "private": true,
+  "description": "End-to-end UI test automation for ELITEA, built with Playwright.",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "dotenv": "^16.4.5"
+  }
+}

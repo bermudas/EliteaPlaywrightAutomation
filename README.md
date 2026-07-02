@@ -31,6 +31,9 @@ npm install
 
 # Install Playwright browsers
 npx playwright install
+
+# Configure environment (copy and fill in real values)
+cp .env.example .env
 ```
 
 ### Running tests
@@ -53,8 +56,12 @@ npx playwright show-report
 
 ```
 .
-├── tests/            # test specs (to be added)
-├── .mcp.json         # Playwright MCP server configuration
+├── tests/
+│   ├── fixtures/env.ts   # fail-fast env loader (BASE_URL, ELITEA_EMAIL, ELITEA_PASSWORD)
+│   └── bootstrap.spec.ts # scaffold-proving smoke test
+├── playwright.config.ts
+├── .env.example          # copy to .env and fill in real values
+├── .mcp.json             # Playwright MCP server configuration
 └── README.md
 ```
 
