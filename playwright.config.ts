@@ -24,6 +24,14 @@ export default defineConfig({
   reporter: [
     ['html', { outputFolder: 'test-results/reports' }],
     ['json', { outputFile: 'test-results/json/run.json' }],
+    // CI-only, additive: Playwright's built-in GitHub Actions reporter emits
+    // `::error::` workflow commands (file:line + message) for every failure,
+    // which GitHub renders as inline annotations on the Checks tab / Files
+    // view. Kept out of local runs -- it's noisy/irrelevant outside Actions.
+    // Confirmed against the installed @playwright/test 1.61.1 type defs
+    // (node_modules/playwright/types/test.d.ts): `['github']` is the exact,
+    // no-options tuple form of `ReporterDescription`.
+    ...(process.env.CI ? [['github'] as const] : []),
   ],
   use: {
     baseURL: env.BASE_URL,

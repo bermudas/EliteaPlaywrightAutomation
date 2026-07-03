@@ -51,6 +51,20 @@ jobs:
           ELITEA_EMAIL: ${{ secrets.ELITEA_EMAIL }}
           ELITEA_PASSWORD: ${{ secrets.ELITEA_PASSWORD }}
 
+      - name: Write step summary (pass/fail + failure reasons)
+        # if: always() so the summary still renders on a red run — that's the
+        # whole point (reviewing WHY something failed without downloading the
+        # HTML report artifact). Reads the existing json reporter's output
+        # (test-results/json/run.json, unchanged by this step) and appends a
+        # markdown table to $GITHUB_STEP_SUMMARY, GitHub's standard mechanism
+        # for run-summary content. Complements, does not replace, the inline
+        # ::error:: annotations from the `github` reporter added in
+        # playwright.config.ts (CI-only) — annotations point at file:line on
+        # the Checks tab, this table gives an at-a-glance pass/fail count +
+        # reason on the run's Summary page.
+        if: always()
+        run: node .github/scripts/summarize-results.js test-results/json/run.json
+
       - name: Upload HTML report
         # if: always() so a failing/red run (including the expected
         # known-defect reds above) still produces a downloadable report.
