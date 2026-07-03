@@ -478,8 +478,20 @@ export class ConversationPage {
    * this is the only count source: sum `pinned.total` + every
    * `date_groups[].total` from the initial (non-`date_group`-scoped)
    * `folder/prompt_lib?grouped=true` response.
+   *
+   * [PR #94 R1 fix, 2026-07-03] Default widened 20_000 -> 30_000. Hard
+   * `TimeoutError`s on this exact wait surfaced during R1 verification
+   * (TC-064's very first navigation) -- the same undersized-timeout-for-
+   * this-account's-real-data-volume defect class the reviewer flagged on
+   * `cardGridList.page.ts`'s `waitForListTotal()`, one file over. This
+   * method is a `lazy-loading` module-only addition (no other spec file
+   * calls it), so widening its default carries none of the shared-caller
+   * regression risk a cross-suite method would. 30_000 matches this file's
+   * own `waitForGroupResponse()` (below) after the same fix and the
+   * project-wide 30s live-backend-wait ceiling `tests/lazy-loading.spec.ts`
+   * TC-064's own settle-wait already established.
    */
-  async waitForGroupedTotal(timeout = 20_000): Promise<{ total: number; body: GroupedConversationsResponse }> {
+  async waitForGroupedTotal(timeout = 30_000): Promise<{ total: number; body: GroupedConversationsResponse }> {
     const response = await this.page.waitForResponse(
       (r) =>
         /\/folder\/prompt_lib\/\d+/.test(r.url()) &&
@@ -493,10 +505,16 @@ export class ConversationPage {
     return { total, body };
   }
 
-  /** Waits for a specific date-group's own group-scoped paginated fetch
+  /**
+   * Waits for a specific date-group's own group-scoped paginated fetch
    * (`&date_group={group}&offset=10...`) -- fires only once that group's
-   * own nested container is expanded and scrolled to bottom. */
-  async waitForGroupResponse(dateGroup: 'today' | 'this_week' | 'older', timeout = 15_000): Promise<Response> {
+   * own nested container is expanded and scrolled to bottom.
+   *
+   * [PR #94 R1 fix, 2026-07-03] Default widened 15_000 -> 30_000, same
+   * rationale as `waitForGroupedTotal()` immediately above -- module-only
+   * caller (`tests/lazy-loading.spec.ts`), no shared-caller regression risk.
+   */
+  async waitForGroupResponse(dateGroup: 'today' | 'this_week' | 'older', timeout = 30_000): Promise<Response> {
     return this.page.waitForResponse(
       (r) =>
         /\/folder\/prompt_lib\/\d+/.test(r.url()) &&

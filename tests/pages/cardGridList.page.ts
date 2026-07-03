@@ -254,8 +254,19 @@ export class CardGridListPage {
    * and `scrollUntilExhausted()` below; exposed directly for callers that
    * need to race it against their own triggering action that isn't a plain
    * `page.goto()` (e.g. TC-061's project-scope combobox switch).
+   *
+   * [PR #94 R1 fix, 2026-07-03] Default widened 15_000 -> 30_000. Reviewer
+   * reproduced a hard `TimeoutError` on this exact wait 3/3 times (called
+   * via `gotoAndCaptureTotal()` from TC-060's first Agents-list navigation)
+   * against this account's now-200+-agent volume. TC-064's own settle-wait
+   * (this same module, `tests/lazy-loading.spec.ts` step 5) already
+   * documents real live-backend settle times up to 30s+ under load and uses
+   * an explicit `{ timeout: 30_000 }` for exactly that reason -- 15s was
+   * simply undersized for this account's current real data volume, not a
+   * concurrency artifact. 30_000 matches that project-wide precedent
+   * instead of inventing a different ceiling.
    */
-  async waitForListTotal(urlContains: string, timeout = 15_000): Promise<number> {
+  async waitForListTotal(urlContains: string, timeout = 30_000): Promise<number> {
     const response = await this.page.waitForResponse(
       (r) => r.url().includes(urlContains) && r.status() === 200,
       { timeout },
@@ -274,8 +285,16 @@ export class CardGridListPage {
    * response matching `urlContains` that fires as a result -- the "read the
    * expected count from the network, not the UI badge" step every
    * lazy-loading AFS in this module opens with.
+   *
+   * [PR #94 R1 fix, 2026-07-03] Default widened 15_000 -> 30_000, matching
+   * `waitForListTotal()`'s own fix above. This is the actual failing call
+   * path the reviewer reproduced (TC-060's `gotoAndCaptureTotal()` ->
+   * `waitForListTotal()`) -- this wrapper's own default must move in lock
+   * step with the underlying method's, since it passes `timeout` straight
+   * through and every current call site (TC-060/TC-063/TC-065/TC-066)
+   * relies on the default rather than passing an explicit value.
    */
-  async gotoAndCaptureTotal(url: string, urlContains: string, timeout = 15_000): Promise<number> {
+  async gotoAndCaptureTotal(url: string, urlContains: string, timeout = 30_000): Promise<number> {
     const [total] = await Promise.all([this.waitForListTotal(urlContains, timeout), this.page.goto(url)]);
     return total;
   }
@@ -300,6 +319,30 @@ export class CardGridListPage {
    * finding (GH#81/GH#82: this shared, concurrently-mutated account's
    * counts can drift mid-run) without forcing an extra page reload just to
    * re-derive a number.
+   *
+   * [PR #94 R1 fix, 2026-07-03 -- tried and reverted, see below]
+   * `perScrollTimeout` stays at its original 10_000 default. First attempt
+   * at this fix widened it to 30_000 (same reasoning as `waitForListTotal()`
+   * above: a timeout here is swallowed via `.catch(() => undefined)`, so
+   * the theoretical risk isn't a hard failure but a silent WRONG result --
+   * two consecutive genuinely-slow-not-exhausted responses both missing the
+   * window would read as "no growth" and end the loop early). That widening
+   * was reverted after R1 verification: it multiplies out across up to 20
+   * iterations x 2 required consecutive-stable reads, and directly caused a
+   * NEW regression -- TC-065/TC-066 (which each chain 3 full
+   * list-exhaustion passes) blew their own outer `test.setTimeout()` budget
+   * (150s/180s) with the browser torn down mid-`scrollUntilExhausted`,
+   * confirmed via a fresh `Test timeout ... exceeded` +
+   * `locator.count: Target page ... has been closed` in
+   * `pollCardCountBeyond()`, where none had existed before. The theoretical
+   * under-count risk this was meant to close is narrower in practice than
+   * the regression it caused, and the original 10_000 value already ships
+   * with its own proven mitigation for this account's exact volatility
+   * class (the two-consecutive-stable-reads design immediately below,
+   * root-caused and verified against GH#81 in the original PR at this same
+   * 10_000 value) -- so the fix for the reviewer's actual reported finding
+   * lives in `waitForListTotal()`/`gotoAndCaptureTotal()` (fired once per
+   * navigation, not in a bounded retry loop) rather than here.
    */
   async scrollUntilExhausted(
     urlContains: string,
