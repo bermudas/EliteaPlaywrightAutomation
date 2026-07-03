@@ -153,18 +153,27 @@ test.describe('@modal-handling', () => {
   // environment -- same rationale as tests/agents.spec.ts/pipelines.spec.ts.
   //
   // Bumped 60_000 -> 120_000 (PR #70 review round 1 re-verification,
-  // 2026-07-03): TC-052/TC-055's fixture create+cancel+delete lifecycle
-  // chains FOUR independent live-backend waits that can each legitimately
-  // take up to 15s under load (createFixture()'s new race-guard wait, its
-  // PUT-confirmation wait, its final rename-visibility check, and
-  // deleteFixture()'s own final removal check) -- confirmed live via trace:
-  // one re-verification run observed a single PUT response alone taking
-  // ~13.3s. The previous 60s budget was sized for the pre-fix flow (a single
-  // 5s-timeout visibility check); the fix in `conversation.page.ts` trades a
-  // real leak/race for legitimately longer worst-case wait chains, so the
-  // suite-level budget needs matching headroom. Applies to all 6 tests in
-  // this file for consistency (harmless for the faster ones -- it only
-  // matters when something is actually slow).
+  // 2026-07-03), kept at 120_000 after round 2's root-cause fix (below) as a
+  // generous, harmless ceiling -- other cases in this file still chain real
+  // live-backend round-trips (agent detail reload, etc.), same rationale as
+  // tests/agents.spec.ts/pipelines.spec.ts.
+  //
+  // **Round 2 update (PR #70 review round 2, 2026-07-03).** Round 1's fix
+  // gated `createFixture()`'s return on the AI-driven rename PUT actually
+  // resolving with the fixture's exact name in its body. Tal's independent
+  // 3-run gate audit post-round-1 (5/6, 6/6, 4/6 across three full-suite
+  // runs -- TC-052 and/or TC-055 hanging on that exact wait until the full
+  // 120s test timeout, on 2 of 3 runs) showed this was genuine
+  // load-dependent AI-pipeline variance (observed as low as ~1s to the full
+  // 120s ceiling), not a fixed worst-case a bigger number could budget
+  // around. Root-caused instead: TC-052/TC-055 never actually needed the
+  // rename to complete -- see `ConversationPage.activeConversationRow()`'s
+  // and `createFixture()`'s own doc comments in `pages/conversation.page.ts`
+  // for the full investigation and fix (an id-derived CSS-class handle that
+  // resolves within ~50-60ms of the create navigation, entirely independent
+  // of the AI rename pipeline). This removes the flake source rather than
+  // widening the budget further; 120s is kept as a ceiling, not because
+  // TC-052/TC-055 are expected to need anywhere near it post-fix.
   test.describe.configure({ timeout: 120_000 });
 
   test('TC-050: close conversation not found modal', async ({ authenticatedPage: page }) => {
@@ -268,6 +277,7 @@ test.describe('@modal-handling', () => {
     const conversations = new ConversationPage(page);
     const fixtureName = `TC052_Cancel_Fixture_${Date.now()}`;
     let fixtureCreated = false;
+    let fixtureId: number | undefined;
 
     // Registered BEFORE the navigation below fires -- `page.goto()` is a full
     // (not client-side) navigation, so the folder list GET happens once as
@@ -294,15 +304,20 @@ test.describe('@modal-handling', () => {
       await test.step('Setup: create a disposable conversation fixture (data-collision guard -- exercises the full cancel-survives lifecycle without risking shared/pre-existing conversations)', async () => {
         // Cleanup is registered via the onCreated callback, fired as soon as
         // the conversation is confirmed real server-side -- guaranteed even
-        // if createFixture()'s own trailing UI-visibility check is slow/fails
-        // (PR #70 review round 1, finding 2).
-        await conversations.createFixture(fixtureName, () => {
+        // if createFixture()'s own trailing activeConversationRow() check is
+        // slow/fails (PR #70 review round 1, finding 2).
+        fixtureId = await conversations.createFixture(fixtureName, () => {
           fixtureCreated = true;
         });
       });
 
       await test.step('4-6. Open the fixture row\'s kebab menu, click "Delete" -- the conversation-specific delete-confirmation dialog opens', async () => {
-        await conversations.openDeleteDialog(fixtureName);
+        // Uses the currently-active row, not a name lookup -- see
+        // ConversationPage.activeConversationRow()'s doc comment (PR #70
+        // review round 2 root-cause fix): the fixture is still the browser's
+        // own open conversation at this point, so this never waits on the
+        // AI-gated rename.
+        await conversations.openDeleteDialogForActive();
       });
 
       await test.step('7. Verify modal content: heading, body text, Cancel/Delete buttons (Delete enabled immediately -- no type-exact-name gate, GH#69, distinct from the Agent/Pipeline dialog)', async () => {
@@ -321,29 +336,36 @@ test.describe('@modal-handling', () => {
       });
 
       await test.step('9. Verify the fixture conversation still exists, and no DELETE request fired on the Cancel path (Axis 2 -- stronger than DOM absence alone)', async () => {
-        await expect(conversations.conversationRow(fixtureName)).toBeVisible();
+        // activeConversationRow(), not conversationRow(fixtureName) -- Cancel
+        // never navigates away, so the fixture remains the active row
+        // regardless of whether its AI-driven rename has landed yet.
+        await expect(conversations.activeConversationRow()).toBeVisible();
         expect(deleteWatcher.fired(), 'no DELETE request should fire on the Cancel path').toBe(false);
       });
       deleteWatcher.stop();
 
       await test.step('Axis 2: a second, independent dismiss path (Escape key) produces the identical non-destructive outcome', async () => {
-        await conversations.openDeleteDialog(fixtureName);
+        await conversations.openDeleteDialogForActive();
         await conversations.dismissDeleteDialogViaEscape();
         await expectNoDialog(page);
-        await expect(conversations.conversationRow(fixtureName)).toBeVisible();
+        await expect(conversations.activeConversationRow()).toBeVisible();
       });
 
       await test.step('Axis 2: persistence survives a hard reload (full server round-trip, not client-cache)', async () => {
         await page.reload();
-        await expect(conversations.conversationRow(fixtureName)).toBeVisible();
+        // Explicit timeout -- activeConversationRow() needs the list to
+        // re-fetch after a full reload (confirmed live: normal page-load
+        // lag, ~1-2s observed, not AI-gated); default 5s expect timeout is
+        // tighter than this file's own reload-wait convention elsewhere.
+        await expect(conversations.activeConversationRow()).toBeVisible({ timeout: 15_000 });
       });
 
       expect(console_.errors, 'no console errors during the cancel-delete-confirmation flow').toEqual([]);
     } finally {
       console_.stop();
-      if (fixtureCreated) {
+      if (fixtureCreated && fixtureId !== undefined) {
         await test.step('Cleanup: delete the disposable fixture conversation for real', async () => {
-          await conversations.deleteFixture(fixtureName);
+          await conversations.deleteFixture(fixtureId as number);
         });
       }
     }
@@ -422,6 +444,7 @@ test.describe('@modal-handling', () => {
     const conversations = new ConversationPage(page);
     const fixtureName = `TC055_Fixture_${Date.now()}`;
     let fixtureCreated = false;
+    let fixtureId: number | undefined;
 
     async function expectAtMostOneDialog(): Promise<void> {
       expect(
@@ -445,9 +468,9 @@ test.describe('@modal-handling', () => {
       await test.step('Setup: create a disposable conversation fixture (data-collision guard, this module\'s high-parallelism convention -- avoids mutating shared/pre-existing conversations)', async () => {
         // Cleanup is registered via the onCreated callback, fired as soon as
         // the conversation is confirmed real server-side -- guaranteed even
-        // if createFixture()'s own trailing UI-visibility check is slow/fails
-        // (PR #70 review round 1, finding 2).
-        await conversations.createFixture(fixtureName, () => {
+        // if createFixture()'s own trailing activeConversationRow() check is
+        // slow/fails (PR #70 review round 1, finding 2).
+        fixtureId = await conversations.createFixture(fixtureName, () => {
           fixtureCreated = true;
         });
       });
@@ -455,7 +478,12 @@ test.describe('@modal-handling', () => {
       const deleteWatcher = trackConversationDeleteRequests(page);
 
       await test.step('4-6 (case numbering). Locate the fixture row, hover to reveal its kebab, click it, then click "Delete" -- second modal appears; never coexists with a first', async () => {
-        await conversations.openConversationMenu(fixtureName);
+        // Uses the currently-active row, not a name lookup -- see
+        // ConversationPage.activeConversationRow()'s doc comment (PR #70
+        // review round 2 root-cause fix): the fixture is still the browser's
+        // own open conversation at this point, so this never waits on the
+        // AI-gated rename.
+        await conversations.openActiveConversationMenu();
         await expectAtMostOneDialog();
         await page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
         await expect(conversations.conversationDeleteDialog()).toBeVisible();
@@ -474,7 +502,10 @@ test.describe('@modal-handling', () => {
       });
 
       await test.step('12. Verify the conversation still exists in the sidebar list, and no DELETE request fired on the Cancel path', async () => {
-        await expect(conversations.conversationRow(fixtureName)).toBeVisible();
+        // activeConversationRow(), not conversationRow(fixtureName) -- Cancel
+        // never navigates away, so the fixture remains the active row
+        // regardless of whether its AI-driven rename has landed yet.
+        await expect(conversations.activeConversationRow()).toBeVisible();
         expect(deleteWatcher.fired(), 'no DELETE request should fire on the Cancel path').toBe(false);
       });
       deleteWatcher.stop();
@@ -482,9 +513,9 @@ test.describe('@modal-handling', () => {
       expect(console_.errors, 'no console errors during the multiple-modals-in-sequence flow').toEqual([]);
     } finally {
       console_.stop();
-      if (fixtureCreated) {
+      if (fixtureCreated && fixtureId !== undefined) {
         await test.step('Cleanup: delete the disposable fixture conversation for real', async () => {
-          await conversations.deleteFixture(fixtureName);
+          await conversations.deleteFixture(fixtureId as number);
         });
       }
     }

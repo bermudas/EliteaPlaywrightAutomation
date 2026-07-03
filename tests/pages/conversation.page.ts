@@ -62,7 +62,12 @@ export class ConversationPage {
   /** A sidebar conversation row, matched by its own accessible name -- the
    * conversation's title. There is no dedicated Name field for
    * conversations (unlike Agents/Pipelines); the app auto-names from the
-   * first sent message. */
+   * first sent message. Documented fallback for locating a row that is NOT
+   * the currently-open/active conversation (e.g. a pre-existing conversation
+   * a case never navigates into) -- for the conversation the caller JUST
+   * created/opened, prefer `activeConversationRow()` instead (see its own
+   * doc comment for why: this locator requires the AI-gated rename to have
+   * already landed, `activeConversationRow()` does not). */
   conversationRow(name: string): Locator {
     return this.page.getByRole('button', { name, exact: true });
   }
@@ -79,6 +84,57 @@ export class ConversationPage {
     await this.conversationMenuButton(name).click();
   }
 
+  /**
+   * The sidebar row for whichever conversation is currently open (i.e. the
+   * one the browser's URL is on) -- located via the app's own
+   * `active-conversation` CSS class, confirmed live (PR #70 review round 2,
+   * 2026-07-03 re-investigation) to be a **client-side-computed** marker
+   * (route id vs. each row's own id), NOT gated behind the AI rename
+   * pipeline. A 5-run timing probe against the live account showed this
+   * class attaches to the correct row ~50-60ms after `waitForURL` resolves
+   * (`tActive - tUrl` across 5 runs: 56, 57, 60, 50, 51ms) -- while the row's
+   * OWN TEXT at that instant still reads the transient "Naming" placeholder,
+   * confirmed via a second probe that the row is already fully interactable
+   * at that point (hover -> kebab -> "Delete" menuitem -> confirmation
+   * dialog opened in ~1-1.5s total, all pre-rename). Exactly one match at
+   * all times while a conversation is open (`document.querySelectorAll(
+   * '.active-conversation').length === 1`, confirmed across every probe run
+   * including immediately post-reload). No `data-testid`/`data-*`/`href`
+   * attribute anywhere in the row or its ancestor chain carries the
+   * conversation's numeric id (confirmed via full DOM attribute sweep) --
+   * this app-authored (non-hashed) CSS class is the closest available proxy
+   * to an id-based handle, which is why it is used here as the PRIMARY
+   * locator for interacting with a conversation the caller just
+   * created/opened, in preference to `conversationRow(name)` (which requires
+   * the AI-gated rename to have already landed -- the actual root cause of
+   * PR #70's TC-052/TC-055 hangs, see `createFixture()`'s own doc comment).
+   *
+   * Only valid while the target conversation is still the active one in this
+   * page's URL -- once the caller navigates elsewhere (or the conversation
+   * itself is deleted, which the app responds to by auto-navigating into a
+   * different existing conversation, confirmed live), this locator resolves
+   * to a DIFFERENT row. Callers needing a specific, possibly-inactive
+   * conversation by its display name should use `conversationRow(name)`
+   * instead.
+   */
+  activeConversationRow(): Locator {
+    return this.page.locator('.active-conversation');
+  }
+
+  private activeConversationMenuButton(): Locator {
+    return this.activeConversationRow().locator('#conversation-menu-action');
+  }
+
+  /** Same interaction as `openConversationMenu(name)`, scoped to the
+   * currently-active conversation instead of a name lookup -- see
+   * `activeConversationRow()`'s own doc comment for why this is preferred
+   * for a conversation the caller just created/opened. */
+  async openActiveConversationMenu(): Promise<void> {
+    const row = this.activeConversationRow();
+    await row.hover();
+    await this.activeConversationMenuButton().click();
+  }
+
   // ---- Conversation delete-confirmation dialog (GH#69 -- see class doc) ----
 
   conversationDeleteDialog(): Locator {
@@ -89,6 +145,16 @@ export class ConversationPage {
    * conversation-specific delete-confirmation dialog. */
   async openDeleteDialog(name: string): Promise<void> {
     await this.openConversationMenu(name);
+    await this.page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
+    await expect(this.conversationDeleteDialog()).toBeVisible();
+  }
+
+  /** Same as `openDeleteDialog(name)`, scoped to the currently-active
+   * conversation -- see `activeConversationRow()`'s own doc comment. Used by
+   * TC-052/TC-055 for their disposable-fixture lifecycle so opening the
+   * delete dialog never has to wait on the AI-gated rename. */
+  async openDeleteDialogForActive(): Promise<void> {
+    await this.openActiveConversationMenu();
     await this.page.getByRole('menuitem', { name: 'Delete', exact: true }).click();
     await expect(this.conversationDeleteDialog()).toBeVisible();
   }
@@ -115,18 +181,25 @@ export class ConversationPage {
   /** Confirms the delete for real -- enabled immediately, no
    * type-the-exact-name gate (unlike the Agent/Pipeline dialog, see class
    * doc comment). Waits for the authoritative
-   * `DELETE .../conversation/prompt_lib/{owner}/{id}` -> 204. */
-  async confirmDelete(): Promise<void> {
+   * `DELETE .../conversation/prompt_lib/{owner}/{id}` -> 204.
+   *
+   * `expectedId`, when given, narrows the wait to the DELETE whose URL id
+   * segment matches exactly -- used by `deleteFixture()` so its own
+   * "confirmed gone" signal is tied to the specific fixture id rather than
+   * "some delete happened" (see `deleteFixture()`'s own doc comment for why
+   * a DOM/URL-based post-delete check turned out to be unreliable). Omit it
+   * for a real, ad-hoc single-delete flow where only one delete could
+   * plausibly be in flight. */
+  async confirmDelete(expectedId?: number): Promise<void> {
     const dialog = this.conversationDeleteDialog();
     const deleteButton = dialog.getByRole('button', { name: 'Delete', exact: true });
     await expect(deleteButton).toBeEnabled();
     await Promise.all([
-      this.page.waitForResponse(
-        (r) =>
-          /\/conversation\/prompt_lib\/\d+\/\d+$/.test(r.url()) &&
-          r.request().method() === 'DELETE' &&
-          r.status() === 204,
-      ),
+      this.page.waitForResponse((r) => {
+        const match = /\/conversation\/prompt_lib\/\d+\/(\d+)$/.exec(r.url());
+        if (!match || r.request().method() !== 'DELETE' || r.status() !== 204) return false;
+        return expectedId === undefined || Number(match[1]) === expectedId;
+      }),
       deleteButton.click(),
     ]);
   }
@@ -146,11 +219,35 @@ export class ConversationPage {
    * Creates a disposable conversation by sending one chat message from a
    * blank composer -- the app auto-names the conversation from the message
    * text (no dedicated Name field, unlike Agents/Pipelines) and fires a
-   * rename `PUT` shortly after the create `POST`. Waits for BOTH the URL to
-   * carry the new numeric id AND the SPECIFIC `PUT` whose response body
-   * actually carries the fixture text (see the precise-matching note below)
-   * before proceeding, so the caller can locate the row by its final name
-   * without racing the transient "New Conversation" placeholder.
+   * rename `PUT` shortly after the create `POST`. Waits for the URL to carry
+   * the new numeric id and for `activeConversationRow()` to resolve (see its
+   * own doc comment) before returning -- it does **not** wait for the rename
+   * `PUT` itself. See "Root-cause fix" below for why.
+   *
+   * **Root-cause fix (PR #70 review round 2, 2026-07-03).** Round 1 matched
+   * on the rename PUT's response body (`body.name === text`) before
+   * returning, reasoning that the caller needed the row locatable by its
+   * final name (`conversationRow(text)`). Tal's independent 3-run gate audit
+   * post-round-1 (5/6, 6/6, 4/6 -- TC-052 and/or TC-055 timing out on this
+   * exact wait, once past its own bumped 30s budget with the suite's 120s
+   * test timeout still exceeded) showed this is genuine load-dependent
+   * variance in the AI-response/rename pipeline (observed as low as ~1s,
+   * as high as the full 120s test timeout), not a fixed worst-case -- i.e.
+   * a real reliability gap in gating on it, not just an under-sized budget.
+   * Re-investigated (round 2) whether the row needs the rename at all: it
+   * does not. Every TC-052/TC-055 interaction against the fixture row
+   * (open kebab menu, click Delete, verify "still exists") happens while
+   * the fixture is still the browser's OWN active conversation, so
+   * `activeConversationRow()` -- a CSS class the app computes client-side
+   * from the route id, confirmed via a 5-run timing probe to attach ~50-60ms
+   * after `waitForURL` resolves, well before the row's text even leaves the
+   * transient "Naming" placeholder -- locates the correct row without ever
+   * touching the AI-gated rename. A second probe confirmed the row is fully
+   * interactable (hover -> kebab -> Delete menuitem -> confirmation dialog)
+   * at that same pre-rename instant. This removes the flake source entirely
+   * for this method's callers rather than budgeting a larger timeout around
+   * it -- see `activeConversationRow()`'s own doc comment for the full
+   * investigation trail.
    *
    * **Race condition fix (PR #70 review round 1, findings 1+2).** Clicking
    * the sidebar "+ Conversation" control does NOT atomically switch the
@@ -192,13 +289,13 @@ export class ConversationPage {
    *
    * **Fixture-leak fix (PR #70 review round 1, finding 2).** The `onCreated`
    * callback fires the moment server-side creation is confirmed (URL
-   * carries the new id AND the touch/rename `PUT` succeeded) -- BEFORE the
-   * trailing UI-visibility assertion below runs. Callers use this to
-   * register cleanup (e.g. set a `fixtureCreated` flag) at the true "the
-   * conversation is real and persisted" boundary, not after this method
-   * fully returns -- otherwise a slow-render UI check that throws leaves
-   * the flag unset while the conversation already exists server-side,
-   * leaking it into the shared live account.
+   * carries the new id) -- BEFORE the trailing `activeConversationRow()`
+   * assertion below runs. Callers use this to register cleanup (e.g. set a
+   * `fixtureCreated` flag) at the true "the conversation is real and
+   * persisted" boundary, not after this method fully returns -- otherwise a
+   * slow-render UI check that throws leaves the flag unset while the
+   * conversation already exists server-side, leaking it into the shared
+   * live account.
    */
   async createFixture(text: string, onCreated?: (id: number) => void): Promise<number> {
     await this.page
@@ -211,31 +308,6 @@ export class ConversationPage {
     await this.page.getByTestId('chat-input').click();
     await this.page.keyboard.type(text);
 
-    // Registered BEFORE the send click below (never after -- a response
-    // that already fired by the time we start listening would be missed).
-    // Confirmed live (PR #70 review round 1 re-investigation) that TWO PUTs
-    // hit this same URL shape in sequence: an early one whose body still
-    // carries a placeholder name ("New Conversation") and a later,
-    // authoritative one whose body carries the real fixture text -- both
-    // gated behind the same AI-response-generation pipeline that also
-    // powers the chat reply, observed taking anywhere from ~1s to ~17s
-    // combined under load. The original implementation matched on URL shape
-    // alone, so it could resolve on the EARLY (placeholder-name) PUT --
-    // meaning the trailing UI-visibility check then had to re-absorb the
-    // SAME AI latency a second time waiting for the sidebar to catch up
-    // (the actual cause of PR #70 review round 1's finding 1, more
-    // precisely diagnosed than "just add a timeout"). Matching on response
-    // BODY content instead means the trailing visibility check only has to
-    // absorb the sidebar's own quick re-render once the correct data is
-    // already confirmed server-side.
-    const renamed = this.page.waitForResponse(async (r) => {
-      if (!(/\/conversation\/prompt_lib\/\d+\/\d+$/.test(r.url()) && r.request().method() === 'PUT' && r.status() === 200)) {
-        return false;
-      }
-      const body = await r.json().catch(() => null);
-      return body?.name === text;
-    }, { timeout: 30_000 });
-
     await Promise.all([this.page.waitForURL(/\/app\/chat\/\d+/), this.page.getByTestId('chat-send-button').click()]);
     const idMatch = this.page.url().match(/\/app\/chat\/(\d+)/);
     if (!idMatch) {
@@ -244,30 +316,45 @@ export class ConversationPage {
     const id = Number(idMatch[1]);
     // Register cleanup NOW -- the conversation is confirmed real and
     // persisted server-side (the create POST succeeded, URL carries a real
-    // id) at this point, independent of whether the rename has completed or
-    // the trailing UI-visibility check below succeeds or times out.
+    // id) at this point, independent of whether the trailing
+    // activeConversationRow() assertion below succeeds or times out.
     onCreated?.(id);
 
-    await renamed;
-    // Explicit generous timeout matching this file's own convention (see
-    // `dismissConversationNotFoundModal(timeout = 15_000)` above) -- this is
-    // now purely the sidebar's own render lag AFTER the rename is already
-    // confirmed server-side (see `renamed` above), not a re-absorption of
-    // the AI-response latency. Previously fell back to Playwright's 5000ms
-    // global default, which was empirically too short under load (PR #70
-    // review round 1, finding 1).
-    await expect(this.conversationRow(text)).toBeVisible({ timeout: 15_000 });
+    // Confirmed live (see this method's own "Root-cause fix" note) to
+    // attach within ~50-60ms of the URL updating -- this is the sidebar's
+    // own client-side render reacting to the route change, NOT a wait on
+    // the AI-gated rename. 15s timeout kept purely as a generous ceiling
+    // consistent with this file's convention; the observed p100 across
+    // every probe run was well under 2s.
+    await expect(this.activeConversationRow()).toBeVisible({ timeout: 15_000 });
     return id;
   }
 
-  /** Full real-delete flow for teardown -- open the row's kebab menu, click
-   * "Delete", confirm for real, verify the row is gone. Same live-backend
-   * render-lag class as `createFixture()`'s own final check (PR #70 review
-   * round 1 audit) -- the sidebar removing the row is a UI reaction to the
-   * just-confirmed `DELETE` response, not an instant DOM update. */
-  async deleteFixture(name: string): Promise<void> {
-    await this.openDeleteDialog(name);
-    await this.confirmDelete();
-    await expect(this.conversationRow(name)).toHaveCount(0, { timeout: 15_000 });
+  /** Full real-delete flow for teardown -- open the currently-active row's
+   * kebab menu, click "Delete", confirm for real.
+   *
+   * **Root-cause fix (PR #70 review round 2).** Previously took the
+   * fixture's `name` and verified removal via `conversationRow(name)`
+   * having count 0 -- a false-positive risk if the AI-gated rename never
+   * completed (the row would never have matched `name` in the first place,
+   * so its "removal" would be vacuously true even if the row, still under
+   * a placeholder, actually still existed). Takes the fixture's numeric
+   * `id` (already known to every caller from `createFixture()`'s own return
+   * value) instead: opens/confirms delete via `activeConversationRow()` (no
+   * name dependency at all), and confirms removal via `confirmDelete(id)`'s
+   * own precise DELETE-response matching (the server's `204` for THIS
+   * specific id is the authoritative "it's gone" signal).
+   *
+   * An earlier version of this fix asserted the URL would stop carrying the
+   * deleted id, on the assumption (confirmed via one manual probe during
+   * investigation) that the app auto-navigates elsewhere after deleting the
+   * active conversation. Re-verified against this suite's own live run:
+   * that redirect is NOT reliable -- the URL stayed on the deleted id for
+   * the full 15s wait in 2/2 real teardown runs during this fix's own
+   * verification. Dropped in favor of the id-matched `204` response, which
+   * has no dependency on any post-delete UI/routing behavior at all. */
+  async deleteFixture(id: number): Promise<void> {
+    await this.openDeleteDialogForActive();
+    await this.confirmDelete(id);
   }
 }
