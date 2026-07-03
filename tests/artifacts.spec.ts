@@ -317,7 +317,7 @@ test.describe('@artifacts', () => {
         // streams in -- a one-shot `.textContent()` read right after
         // visibility raced an empty placeholder. `toContainText()` polls
         // until real content lands, the correct condition-wait here.
-        await expect(artifacts.assistantReply()).toContainText(/\S/, { timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
       });
 
       await test.step('10. Thumbnail is previewable via a forced click (GH#117 -- a plain click times out)', async () => {
@@ -408,7 +408,7 @@ test.describe('@artifacts', () => {
         // toContainText() polls until the streamed reply lands -- a one-shot
         // textContent() read right after toBeVisible() raced an empty
         // placeholder (root-caused during implementation).
-        await expect(artifacts.assistantReply()).toContainText(/Test PDF Document|PDFs not supported/i, {
+        await expect(artifacts.assistantReply(messageText)).toContainText(/Test PDF Document|PDFs not supported/i, {
           timeout: 30_000,
         });
         await expect(page.getByRole('alert')).toHaveCount(0);
@@ -476,7 +476,7 @@ test.describe('@artifacts', () => {
       });
 
       await test.step("10-11. Assistant reply demonstrably quotes the file's own content; no error/rejection UI anywhere", async () => {
-        await expect(artifacts.assistantReply()).toContainText(/This is a test text file/i, { timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toContainText(/This is a test text file/i, { timeout: 30_000 });
         await expect(page.getByRole('alert')).toHaveCount(0);
       });
 
@@ -608,7 +608,7 @@ test.describe('@artifacts', () => {
       // test in this module (TC-030/035/036/037) already does this before
       // its own next interaction with the message row.
       await test.step("Wait for the assistant's reply to finish before repeatedly interacting with the message row (avoids racing an in-flight list re-render)", async () => {
-        await expect(artifacts.assistantReply()).toContainText(/\S/, { timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
       });
 
       await test.step('9-10. Force-click opens a genuine preview dialog with filename, enlarged image, and the three action buttons', async () => {
@@ -691,7 +691,7 @@ test.describe('@artifacts', () => {
       await test.step("8. Sent message shows text + attachment; assistant's reply corroborates first-frame-only processing", async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
         await expect(artifacts.messageThumbnail('test-animated.gif')).toBeVisible();
-        await expect(artifacts.assistantReply()).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
       });
 
       await test.step('9. Inline chat thumbnail is static, first-frame-only (PASSES -- pre-rasterized JPEG data URI, cannot animate)', async () => {
@@ -865,7 +865,7 @@ test.describe('@artifacts', () => {
       // -- the same pattern TC-030/034/035 already use for this exact
       // reason -- polls until real content lands, not just a container.
       await test.step("Wait for the assistant's processing of this attachment to finish before deleting it (avoids racing an in-flight model fetch of the file)", async () => {
-        await expect(artifacts.assistantReply()).toContainText(/\S/, { timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
       });
 
       await test.step('8-9. Hover the action-buttons container (NOT the image -- hovering the image itself times out), click Remove attachment', async () => {
@@ -993,7 +993,7 @@ test.describe('@artifacts', () => {
       });
 
       await test.step("10-11. Assistant reply renders; no error/rejection UI anywhere (live, confirmed contract -- GH#113 tracks the UX gap, not asserted as a failure here)", async () => {
-        await expect(artifacts.assistantReply()).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
         await expect(page.getByRole('alert')).toHaveCount(0);
         // Root-caused during this debugging pass: a page-wide
         // `getByRole('status')` assertion was never grounded in this AFS
@@ -1094,7 +1094,7 @@ test.describe('@artifacts', () => {
         for (const fileName of fileNames) {
           await expect(artifacts.messageThumbnail(fileName)).toBeVisible();
         }
-        await expect(artifacts.assistantReply()).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
       });
 
       await test.step('11. Each of the 3 thumbnails independently opens a preview lightbox (force-click required)', async () => {
@@ -1170,7 +1170,21 @@ test.describe('@artifacts', () => {
       await test.step('5-6. Drop the file -- preview chip renders with the filename', async () => {
         await dropDraggedFile(page, dragDataTransfer);
         await expect(artifacts.preSendChip('test-drag-drop.png')).toBeVisible();
-        await expect(artifacts.attachCounterText()).toHaveAccessibleName(/9 left/);
+        // Known defect: GH#124 -- the ambient "Attach Files (N left)" counter
+        // does not decrement after a drag-and-drop attach, even with the
+        // single-continuous-gesture technique (see `dragOverComposer()`'s own
+        // doc comment for the DIFFERENT, already-fixed double-gesture issue
+        // this is not). Root-caused live (2026-07-03 debugging pass): the
+        // preceding `preSendChip` assertion (a hard assert, still enforced
+        // above) already proves the file genuinely attached -- this is a
+        // display-only desync isolated to the counter, confirmed via a full
+        // 5s re-poll returning the identical stale value 14 times (not a
+        // transient render lag). Soft-asserted so the rest of this test's
+        // real send/upload/persist flow -- unaffected by the stale label --
+        // still runs and gets verified.
+        await expect
+          .soft(artifacts.attachCounterText(), 'Known defect: GH#124 (drag-and-drop attach counter does not decrement)')
+          .toHaveAccessibleName(/9 left/);
       });
 
       await test.step('7-8. Type the required message text and send', async () => {
@@ -1180,7 +1194,7 @@ test.describe('@artifacts', () => {
 
       await test.step("9. Message renders with the attachment thumbnail; assistant's reply describes the real content", async () => {
         await expect(artifacts.messageThumbnail('test-drag-drop.png')).toBeVisible();
-        await expect(artifacts.assistantReply()).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
       });
 
       await test.step('10. Thumbnail is clickable and opens a genuine preview dialog', async () => {
@@ -1252,7 +1266,7 @@ test.describe('@artifacts', () => {
       });
 
       await test.step("12. Assistant's reply demonstrably describes the pasted image's actual content", async () => {
-        await expect(artifacts.assistantReply()).toContainText(/\S/, { timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
       });
 
       await test.step('13. Thumbnail opens a full-size preview modal via a forced click (GH#117, reconfirmed for paste-produced attachments)', async () => {
@@ -1361,7 +1375,7 @@ test.describe('@artifacts', () => {
         for (const fileName of fileNames) {
           await expect(artifacts.messageThumbnail(fileName)).toBeVisible();
         }
-        await expect(artifacts.assistantReply()).toContainText(/10/, { timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toContainText(/10/, { timeout: 30_000 });
       });
 
       await test.step('11. Two random thumbnails each independently open their own preview (force-click required)', async () => {
@@ -1455,7 +1469,7 @@ test.describe('@artifacts', () => {
           await expect(artifacts.messageThumbnail(fileName)).toBeVisible();
         }
         await expect(artifacts.messageThumbnail(rejectedFileName)).toHaveCount(0);
-        await expect(artifacts.assistantReply()).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
       });
 
       await test.step('10. Artifacts bucket persists exactly 10 files -- "1 - 10 of 10", the strongest available confirmation', async () => {

@@ -365,8 +365,51 @@ export class ArtifactsPage {
     return fileName ? card.filter({ hasText: fileName }) : card;
   }
 
-  assistantReply(): Locator {
-    return this.page.getByTestId('chat-answer-content');
+  /**
+   * The assistant's reply row scoped to the one immediately following the
+   * user's OWN message row identified by `messageText` -- NOT a bare
+   * page-wide `chat-answer-content` query.
+   *
+   * Root-caused during a dedicated debugging pass on this suite's own PR
+   * (TC-031 failure evidence: `getByTestId('chat-answer-content')` resolved
+   * to 2 elements, one of them carrying content from an entirely different,
+   * earlier test's conversation -- e.g. TC-030's own "Test Small" image
+   * description bleeding into TC-031's PDF-upload assertion; TC-037's two
+   * different observed failure shapes across fix attempts, a timeout in one
+   * run and a 2-element strict-mode violation in another, are the SAME root
+   * cause at different poll-timing windows, not two separate bugs).
+   *
+   * Confirmed live via direct DOM inspection (`playwright-cli`, real account,
+   * 2026-07-03): `gotoChat()`'s own `/app/chat/` navigation restores the
+   * shared account's MOST RECENTLY ACTIVE conversation -- full message
+   * history rendered, including its own `chat-answer-content` -- before
+   * `startNewConversation()`'s "+ Conversation" click clears the composer
+   * back to a blank welcome panel (confirmed: 0 `chat-answer-content`
+   * elements anywhere in `document` immediately after, and staying 0 over
+   * several seconds of idle observation). The stale conversation is NOT
+   * simply "never unmounted" -- it resurfaces under this shared, real-world-
+   * loaded account's own timing once a fresh conversation's message send is
+   * in flight, exactly the class of race `startNewConversation()`'s own
+   * existing doc comment already documents for the PRE-send window ("the
+   * message-thread panel can still point at whichever conversation was
+   * previously open"). A bare page-wide `chat-answer-content` query has no
+   * way to distinguish "my conversation's reply" from a stale one that
+   * resurfaces during or after send, regardless of the exact client-side
+   * mechanism that re-renders it.
+   *
+   * The fix does not depend on pinning down that exact mechanism: every
+   * `chat-message-item` (user AND assistant rows alike) renders as a flat
+   * `<li>` sibling inside the same `<ul>` (confirmed live via direct DOM
+   * inspection: `userMessageRow(text).nextElementSibling === replyRow`), so
+   * scoping to "the reply that is structurally my own message's very next
+   * sibling" is immune to any number of stale/leftover conversations
+   * elsewhere in the DOM, no matter how or why they got there. `.last()`
+   * would NOT be safe here either -- `chatMessageItems()`'s own doc comment
+   * already documents why a loading-placeholder reply row can transiently
+   * become the last item for an unrelated reason.
+   */
+  assistantReply(messageText: string): Locator {
+    return this.userMessageRow(messageText).locator('xpath=following-sibling::*[1]').getByTestId('chat-answer-content');
   }
 
   /**
