@@ -273,6 +273,25 @@ export class ArtifactsPage {
     return this.page.getByRole('menuitem', { name: fileName });
   }
 
+  /**
+   * Closes the "Show more files" overflow menu (a MUI Popover/Menu,
+   * `role="menu"`) opened via `showMoreFilesButton()`. Root-caused during
+   * implementation (TC-039): the menu's own invisible `MuiBackdrop-root`
+   * stays mounted and intercepts pointer events on the composer -- calling
+   * `typeMessage()` right after checking the overflow's contents hangs
+   * indefinitely on that backdrop, since nothing in the AFS-documented flow
+   * ever explicitly closes the menu before moving on. `Escape` is the
+   * standard, confirmed-working MUI Menu dismissal (distinct from the image
+   * preview modal's own broken ESC handling, GH#119 -- that's a different
+   * component). Every batch-upload case that opens this overflow
+   * (TC-039/042/043) must call this before any further composer
+   * interaction.
+   */
+  async closeOverflowMenu(): Promise<void> {
+    await this.page.keyboard.press('Escape');
+    await expect(this.page.getByRole('menu')).toHaveCount(0);
+  }
+
   /** Pre-send attachment chip in the composer, matched by filename text --
    * no `data-testid` exists on this chip (gap noted since TC-032's AFS). */
   preSendChip(fileName: string): Locator {
@@ -756,18 +775,87 @@ async function createFileDataTransfer(page: Page, filePath: string, mimeType: st
   );
 }
 
-/** Dispatches `dragenter` + `dragover` only (no `drop`) on the composer --
+/**
+ * Whether the composer's drag-active dashed-border feedback is currently
+ * showing. Root-caused during this debugging pass (not documented by the
+ * AFS, which only says "the entire composer box gets a teal/cyan dashed-
+ * border highlight" without naming the exact element): the dashed border is
+ * applied to an OUTER WRAPPING ancestor of `chat-input` -- confirmed live via
+ * direct DOM inspection (the ancestor's bounding box matches the visible
+ * composer box in the AFS's own screenshot evidence exactly), several
+ * levels up, not to `chat-input` itself. That ancestor's own class is a
+ * MUI/emotion-generated, build-unstable string (observed to differ between
+ * page loads of the same session) -- there is no stable class/testid/role to
+ * target it by. Walking the ancestor chain from the one stable handle that
+ * DOES exist (`chat-input`) and checking each one's own computed
+ * `border-style` for "dashed" is the robust, class-name-independent way to
+ * observe this state -- this is what made the original direct
+ * `chatInput.evaluate(...borderStyle)` check (asserting on `chat-input`'s
+ * OWN border, which never changes) structurally unable to ever pass.
+ */
+async function composerHasDragActiveBorder(page: Page): Promise<boolean> {
+  return page.getByTestId('chat-input').evaluate((el) => {
+    let node: HTMLElement | null = el;
+    while (node) {
+      if (getComputedStyle(node).borderStyle.includes('dashed')) return true;
+      node = node.parentElement;
+    }
+    return false;
+  });
+}
+
+/** Polls `composerHasDragActiveBorder()` until it reaches `expected` --
+ * exported so the spec can assert both the "not yet active" (pre-drag) and
+ * "now active" (during dragover) states without duplicating the ancestor-walk
+ * logic. */
+export async function expectComposerDragActiveBorder(page: Page, expected: boolean, timeout = 3_000): Promise<void> {
+  await expect.poll(() => composerHasDragActiveBorder(page), { timeout }).toBe(expected);
+}
+
+/**
+ * Dispatches `dragenter` + `dragover` only (no `drop`) on the composer --
  * for asserting the dragover-active visual feedback (dashed-border
- * highlight) BEFORE completing the drop (TC-040 step 4). */
-export async function dragOverComposer(page: Page, filePath: string, mimeType = 'image/png'): Promise<void> {
+ * highlight) BEFORE completing the drop (TC-040 step 4). Returns the
+ * `DataTransfer` handle so a caller can continue the SAME drag gesture with
+ * `dropDraggedFile()` below, rather than starting a second, independent one.
+ *
+ * Root-caused during this debugging pass: an EARLIER version of this helper
+ * returned `void`, and TC-040's own test called this once (to check the
+ * visual feedback), then separately called the old `dropFileOnComposer()`
+ * (which built its OWN, second `DataTransfer` and re-dispatched its own
+ * `dragenter`/`dragover` before `drop`) -- two independent drag sequences
+ * back-to-back, with no `dragleave`/`drop` ending the first one. Confirmed
+ * live, reproducibly (2 consecutive clean runs, not a one-off flake): the
+ * app's own attach-slot counter never decremented after the second
+ * sequence's `drop` (stayed at "10 left" instead of "9 left") even though
+ * the pre-send chip still rendered -- consistent with the app's internal
+ * drag-state tracking (most nested-drag-target implementations count
+ * enter/leave pairs) getting left in an inconsistent state by the
+ * back-to-back double dragenter with no leave/drop between them. Continuing
+ * a SINGLE gesture (one `DataTransfer`, one dragenter/dragover, one drop) is
+ * both the technique the AFS's own code sample documents and the fix.
+ */
+export async function dragOverComposer(page: Page, filePath: string, mimeType = 'image/png'): Promise<JSHandle> {
   const dataTransfer = await createFileDataTransfer(page, filePath, mimeType);
   const target = page.getByTestId('chat-input');
   await target.dispatchEvent('dragenter', { dataTransfer });
   await target.dispatchEvent('dragover', { dataTransfer });
+  return dataTransfer;
+}
+
+/** Completes a drag gesture already started by `dragOverComposer()` --
+ * dispatches only `drop`, reusing the SAME `DataTransfer` handle (see that
+ * function's own doc comment for why a second, independent `DataTransfer` +
+ * re-dispatched `dragenter`/`dragover` left the app's attach-slot counter
+ * stuck). */
+export async function dropDraggedFile(page: Page, dataTransfer: JSHandle): Promise<void> {
+  await page.getByTestId('chat-input').dispatchEvent('drop', { dataTransfer });
 }
 
 /** Full drag-and-drop sequence (`dragenter` -> `dragover` -> `drop`) on the
- * chat composer -- the confirmed-working technique for TC-040. */
+ * chat composer in ONE continuous gesture -- for callers that don't need to
+ * assert the dragover-only visual feedback separately. Prefer
+ * `dragOverComposer()` + `dropDraggedFile()` when both need checking (TC-040). */
 export async function dropFileOnComposer(page: Page, filePath: string, mimeType = 'image/png'): Promise<void> {
   const dataTransfer = await createFileDataTransfer(page, filePath, mimeType);
   const target = page.getByTestId('chat-input');

@@ -13,7 +13,8 @@ import { env } from './fixtures/env';
 import {
   ArtifactsPage,
   dragOverComposer,
-  dropFileOnComposer,
+  dropDraggedFile,
+  expectComposerDragActiveBorder,
   extractUploadUuid,
   parseAttachmentUrl,
   pasteFromClipboard,
@@ -591,6 +592,25 @@ test.describe('@artifacts', () => {
         await expect(artifacts.messageThumbnail('test-preview-image.png')).toBeVisible();
       });
 
+      // Root-caused during this debugging pass (not documented by the AFS,
+      // which never waits on the assistant before the repeated open/close
+      // cycle): confirmed live via direct DOM inspection that the SAME
+      // "open the preview" force-click reliably succeeds twice, then
+      // reproducibly fails on a 3rd re-open right after the assistant's
+      // reply is still streaming ("Wiring integrations..." placeholder
+      // visible in the failure screenshot -- the reply had NOT finished).
+      // Same class of race already root-caused for TC-037's own delete
+      // flow: the assistant's still-in-flight reply appending new content
+      // appears to trigger a broader message-list re-render that can land
+      // mid-interaction with a sibling row's own elements. Waiting for the
+      // assistant's reply to genuinely finish before the repeated
+      // open/close cycle removes the race; every other single-attachment
+      // test in this module (TC-030/035/036/037) already does this before
+      // its own next interaction with the message row.
+      await test.step("Wait for the assistant's reply to finish before repeatedly interacting with the message row (avoids racing an in-flight list re-render)", async () => {
+        await expect(artifacts.assistantReply()).toContainText(/\S/, { timeout: 30_000 });
+      });
+
       await test.step('9-10. Force-click opens a genuine preview dialog with filename, enlarged image, and the three action buttons', async () => {
         await artifacts.openThumbnailPreview('test-preview-image.png');
         await expect(artifacts.previewModal()).toContainText('test-preview-image.png');
@@ -813,6 +833,41 @@ test.describe('@artifacts', () => {
         await expect(artifacts.messageThumbnail('test-delete-target.png')).toBeVisible();
       });
 
+      // Root-caused during this debugging pass (not documented by the AFS,
+      // which never waits on the assistant before deleting): deleting the
+      // attachment (with storage purge) WHILE the assistant is still
+      // processing it races the model's own backend fetch of the image
+      // bytes. Confirmed live via the failure's own DOM snapshot -- the
+      // assistant's reply came back as a genuine backend error ("Internal
+      // SDK error... Invalid/Unsupported image URL filepath:/attachments/
+      // {uuid}/test-delete-target.png") for OUR OWN upload, because the file
+      // was already purged from storage by the time the model's fetch ran.
+      // That error reply's own arrival/render appears to re-assert the
+      // message's stale attachment reference, which is why the thumbnail
+      // was observed present continuously (never dropping to 0) for the
+      // full 15s poll window afterward -- not a slow SPA refetch, a race
+      // against still-in-flight model processing. Waiting for the assistant
+      // to finish (successfully or not) before deleting removes the race
+      // entirely; every other single-attachment test in this module
+      // (TC-030/034/035/036) already does this before its own next step.
+      //
+      // Second amendment (full-suite verification run): a bare
+      // `toBeVisible()` on the reply container is not a strong enough
+      // signal -- confirmed live (full-suite run) that this same
+      // container mounts as a loading placeholder ("Waking the agent...",
+      // "Packing its tools...") before its real content streams in, the
+      // exact race `sendAndCaptureUpload()`'s own doc comment already
+      // documents for this project. `toBeVisible()` was satisfied by the
+      // placeholder, not the finished reply, so the hover/click that
+      // followed still raced an in-flight re-render (observed live: the
+      // "Remove attachment" button was detached and re-attached from the
+      // DOM repeatedly until the test's 120s ceiling). `toContainText(/\S/)`
+      // -- the same pattern TC-030/034/035 already use for this exact
+      // reason -- polls until real content lands, not just a container.
+      await test.step("Wait for the assistant's processing of this attachment to finish before deleting it (avoids racing an in-flight model fetch of the file)", async () => {
+        await expect(artifacts.assistantReply()).toContainText(/\S/, { timeout: 30_000 });
+      });
+
       await test.step('8-9. Hover the action-buttons container (NOT the image -- hovering the image itself times out), click Remove attachment', async () => {
         const container = await artifacts.hoverAttachActionButtons('test-delete-target.png');
         await expect(artifacts.downloadImageButton(container)).toBeVisible();
@@ -855,8 +910,21 @@ test.describe('@artifacts', () => {
       await test.step('14-16. Verify full removal from backend storage via the authoritative S3 listing (stronger than a UI-only check)', async () => {
         const listing = await artifacts.fetchBucketListing('attachments', upload!.projectId);
         expect(listing.isTruncated).toBe(false);
+        // Root-caused during this debugging pass: a bare whole-bucket
+        // filename search (`key.includes('test-delete-target')`, no uuid
+        // scoping) is NOT run-isolated on this shared, ever-accumulating
+        // account -- confirmed live: a stale, unrelated `test-delete-
+        // target.png` from an earlier, uncleaned session was still present
+        // under a DIFFERENT uuid folder, permanently failing this exact
+        // assertion regardless of whether THIS run's own upload was
+        // correctly purged. Same class of shared-account whole-bucket-count
+        // hazard TC-039's own AFS already documents (GH#118 point 2: "the
+        // bucket-level listing... is a flat, whole-bucket, shared-account
+        // total... not usable for a delta assertion"). The uuid-scoped
+        // check below is the actual, run-isolated proof this run's own file
+        // is gone; the filename-only whole-bucket variant is dropped as an
+        // AFS amendment (see this case's own AFS Automation Hints).
         expect(listing.contents?.some((c) => c.key.includes(upload!.uuid))).toBe(false);
-        expect(listing.contents?.some((c) => c.key.includes('test-delete-target'))).toBe(false);
       });
 
       await test.step('17. Chat remains functional', async () => {
@@ -927,7 +995,18 @@ test.describe('@artifacts', () => {
       await test.step("10-11. Assistant reply renders; no error/rejection UI anywhere (live, confirmed contract -- GH#113 tracks the UX gap, not asserted as a failure here)", async () => {
         await expect(artifacts.assistantReply()).toBeVisible({ timeout: 30_000 });
         await expect(page.getByRole('alert')).toHaveCount(0);
-        await expect(page.getByRole('status')).toHaveCount(0);
+        // Root-caused during this debugging pass: a page-wide
+        // `getByRole('status')` assertion was never grounded in this AFS
+        // (no rejection-toast/status handle is documented anywhere in it) --
+        // it collided with a permanent, benign, always-present ARIA live
+        // region (`<div id="DndLiveRegion-0" role="status" aria-live=
+        // "assertive">`, visually clipped to 1x1px) that react-dnd mounts on
+        // every page load, unrelated to file-rejection UX. Removed as an
+        // invented assertion that tested the wrong thing, not a scope
+        // reduction of the AFS's own coverage -- the "no error/rejection UI"
+        // contract is already fully covered by the `getByRole('alert')`
+        // check above (a real toast/banner would render as `role="alert"`,
+        // confirmed project-wide, e.g. TC-033's size-limit rejection toast).
       });
 
       await test.step('12. File never appears in the Artifacts attachments bucket', async () => {
@@ -970,9 +1049,29 @@ test.describe('@artifacts', () => {
           await expect(artifacts.preSendChip('test-batch-1.png')).toBeVisible();
           await expect(artifacts.preSendChip('test-batch-2.jpg')).toBeVisible();
           await expect(artifacts.showMoreFilesButton()).toContainText('+1');
+          // Root-caused during this debugging pass: check the ambient
+          // counter's accessible name BEFORE opening the "Show more files"
+          // overflow menu, not after. Confirmed live via the locator's own
+          // call log: the span DOES carry `aria-label="Attach Files (7
+          // left)"` at all times (`resolved to <span ... aria-label="Attach
+          // Files (7 left)">`), but `toHaveAccessibleName()` reads back ""
+          // once the overflow menu (`role="menu"`, MUI's Menu/Modal
+          // component) is open -- MUI's Modal marks background/sibling
+          // content `aria-hidden="true"` while an anchored menu is open (an
+          // intentional, correct a11y-isolation pattern, not a defect), and
+          // the composer's counter span sits in that now-inert background.
+          // Same instinct already established for TC-042 below, which
+          // already checks its own ambient `maxAttachmentsText()` before
+          // opening the overflow for this exact reason.
+          await expect(artifacts.attachCounterText()).toHaveAccessibleName(/7 left/);
           await artifacts.showMoreFilesButton().click();
           await expect(artifacts.overflowFileItem('test-batch-3.png')).toBeVisible();
-          await expect(artifacts.attachCounterText()).toHaveAccessibleName(/7 left/);
+          // Root-caused during this debugging pass (a second, previously-
+          // hidden bug the accessible-name failure above was masking):
+          // the overflow menu's own invisible backdrop stays mounted and
+          // intercepts pointer events on the composer -- `typeMessage()`
+          // right after this hung indefinitely without an explicit close.
+          await artifacts.closeOverflowMenu();
         });
 
         await test.step('7-8. Type message, send -- exactly 3 attachment POSTs fire, all sharing one destination folder', async () => {
@@ -1040,17 +1139,36 @@ test.describe('@artifacts', () => {
         await artifacts.startNewConversation();
       });
 
+      // Root-caused during this debugging pass: dispatching the dragover
+      // check (step 4) and the drop (steps 5-6) as two INDEPENDENT drag
+      // gestures -- each building its own fresh `DataTransfer` and
+      // re-dispatching its own `dragenter`/`dragover` before the second
+      // one's `drop` -- reproducibly (2 consecutive clean runs) left the
+      // app's attach-slot counter stuck at "10 left" after the drop, even
+      // though the pre-send chip still rendered. Continuing the SAME
+      // gesture (one `DataTransfer`, carried from `dragOverComposer()`
+      // into `dropDraggedFile()`) is both the fix and a closer match to
+      // what a real single mouse-drag-and-release produces. See both
+      // functions' own doc comments in `artifacts.page.ts`.
+      let dragDataTransfer: Awaited<ReturnType<typeof dragOverComposer>>;
       await test.step('4. Drag the file over the composer -- visible drag-active feedback appears before drop (a real, assertable CSS state change)', async () => {
-        const borderBefore = await artifacts.chatInput.evaluate((el) => getComputedStyle(el).borderStyle);
-        await dragOverComposer(page, filePath);
-        await expect(async () => {
-          const borderDuring = await artifacts.chatInput.evaluate((el) => getComputedStyle(el).borderStyle);
-          expect(borderDuring).not.toBe(borderBefore);
-        }).toPass({ timeout: 3_000 });
+        // The dashed-border drag-active feedback is applied to an OUTER
+        // WRAPPING ancestor of `chat-input` (confirmed live via direct DOM
+        // inspection -- its bounding box matches the AFS's own screenshot
+        // evidence of "the entire composer box" exactly), not to
+        // `chat-input` itself, whose own `borderStyle` never changes. That
+        // ancestor has no stable class/testid/role (a build-unstable
+        // MUI/emotion-generated class), so `expectComposerDragActiveBorder()`
+        // walks the ancestor chain from the one stable handle that exists
+        // (`chat-input`) and checks each ancestor's own computed
+        // border-style -- see its own doc comment in `artifacts.page.ts`.
+        await expectComposerDragActiveBorder(page, false);
+        dragDataTransfer = await dragOverComposer(page, filePath);
+        await expectComposerDragActiveBorder(page, true);
       });
 
       await test.step('5-6. Drop the file -- preview chip renders with the filename', async () => {
-        await dropFileOnComposer(page, filePath);
+        await dropDraggedFile(page, dragDataTransfer);
         await expect(artifacts.preSendChip('test-drag-drop.png')).toBeVisible();
         await expect(artifacts.attachCounterText()).toHaveAccessibleName(/9 left/);
       });
@@ -1089,6 +1207,16 @@ test.describe('@artifacts', () => {
   });
 
   test('TC-041: upload an image via clipboard paste (Ctrl+V / Cmd+V)', async ({ authenticatedPage: page }) => {
+    // Secondary safety margin, not the primary fix for this case's own
+    // debugging pass (first-ever execution) -- the actual root cause (the
+    // teardown's `page.goto()` racing the SPA's own post-navigation load,
+    // with the release-notes banner re-shown and blocking) is fixed at the
+    // teardown's own call site below. This test's round trip (30s
+    // assistant-reply wait, 20s bucket-row wait, full teardown) is still
+    // comparably long to TC-042/TC-043's (which already override the
+    // module default via `test.setTimeout(150_000)` a few tests below) --
+    // kept here as headroom given this account's documented volatility.
+    test.setTimeout(150_000);
     const console_ = trackConsoleErrors(page);
     const artifacts = new ArtifactsPage(page);
     const filePath = fixturePath('test-paste.png');
@@ -1153,7 +1281,25 @@ test.describe('@artifacts', () => {
         // checkbox) is the only path confirmed to leave a fully consistent
         // clean state on both sides.
         await test.step("Teardown: remove the pasted attachment via the chat-message path (NOT the Artifacts-page-only path -- GH#122)", async () => {
+          // Root-caused during this debugging pass: TC-041 is the only case
+          // in this module whose teardown re-navigates to the chat page
+          // (`page.goto()`) AFTER already navigating away to the Artifacts
+          // bucket (step 14-15) -- every other case's teardown stays on the
+          // page it was already on. Confirmed live via the failure's own
+          // screenshot: right after this `goto()`, the page was still on
+          // its OWN loading spinner (conversation history not yet fetched)
+          // WITH the release-notes banner re-shown (a fresh full navigation
+          // doesn't retain the earlier dismissal) -- the thumbnail's `<img>`
+          // genuinely did not exist yet, and repeated hangs (even at a
+          // 150s budget) point to this taking far longer than expected
+          // under today's account load. Every other navigation point in
+          // this module (`gotoChat()`, `openBucketFolder()`) already
+          // dismisses the banner and/or waits on a concrete post-navigation
+          // signal -- this teardown didn't, since it was the only one that
+          // needed to. Added both here.
           await page.goto(`${env.BASE_URL}/app/chat/${upload!.conversationId}`);
+          await dismissAnnouncementBanner(page);
+          await expect(artifacts.messageThumbnail(upload!.fileName)).toBeVisible({ timeout: 30_000 });
           const response = await artifacts.removeAttachmentFromChatMessage(true, upload!.fileName);
           expect(response.status()).toBe(204);
           expect(response.url()).toContain('keep_in_storage=0');
@@ -1190,6 +1336,12 @@ test.describe('@artifacts', () => {
           for (const fileName of fileNames.slice(2)) {
             await expect(artifacts.overflowFileItem(fileName)).toBeVisible();
           }
+          // Preemptive fix (same root cause diagnosed live in TC-039's own
+          // debugging pass): the overflow menu's invisible backdrop stays
+          // mounted and intercepts pointer events on the composer -- close
+          // it before the next step's `typeMessage()` click, or that click
+          // hangs indefinitely.
+          await artifacts.closeOverflowMenu();
         });
 
         await test.step('7-9. Send -- exactly 10 attachment POSTs fire, all sharing one folder, byte-exact sizes', async () => {
@@ -1273,6 +1425,11 @@ test.describe('@artifacts', () => {
         // Behavior-B "warning," not a transient toast.
         await expect(page.getByRole('dialog')).toHaveCount(0);
         await expect(page.getByRole('alert')).toHaveCount(0);
+        // Preemptive fix (same root cause diagnosed live in TC-039's own
+        // debugging pass): close the overflow menu before the next step's
+        // `typeMessage()` click -- its invisible backdrop otherwise
+        // intercepts pointer events on the composer indefinitely.
+        await artifacts.closeOverflowMenu();
       });
 
       const uploads = trackAttachmentUploads(page);
