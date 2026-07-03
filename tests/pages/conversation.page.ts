@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page } from '@playwright/test';
+import { expect, type Locator, type Page, type Response } from '@playwright/test';
 
 /**
  * Page object for the chat sidebar's conversation list and the two
@@ -31,6 +31,22 @@ import { expect, type Locator, type Page } from '@playwright/test';
  * across every rendered row (confirmed live: 27+ occurrences) -- every
  * method below scopes it under the parent row's own
  * `getByRole('button', { name })` locator, never queries the bare id.
+ *
+ * **[Added during the `lazy-loading` module batch, TC-064/TC-066]** the
+ * group-aware sidebar lazy-load/grouping surface -- confirmed live to be a
+ * genuinely different mechanism from the flat, offset-paginated
+ * Agents/Pipelines/Toolkits card grid (`cardGridList.page.ts`): the initial
+ * `folder/prompt_lib?grouped=true` fetch returns EVERY date group (`today`/
+ * `this_week`/`older`) in one shot, each capped at its own first 10 items
+ * regardless of that group's own `total`; a group's remainder only loads via
+ * a second, group-scoped request (`&date_group={group}&limit=10&offset=10`)
+ * triggered by scrolling THAT SPECIFIC group's own nested scroll container
+ * -- not the outer page, not the chat transcript's own "scrollable content"
+ * region. See `conversations_list_is_group_paginated_not_flat_infinite_scroll.md`
+ * (qa-engineer memory) for the full investigation trail both AFS files
+ * independently arrived at. Extended here (not built as a new page object,
+ * and not folded into `cardGridList.page.ts`'s flat-list model) per
+ * `.agents/testing.md` § Structure's own plan for this module.
  */
 export class ConversationPage {
   constructor(private readonly page: Page) {}
@@ -357,4 +373,163 @@ export class ConversationPage {
     await this.openDeleteDialogForActive();
     await this.confirmDelete(id);
   }
+
+  // ---- Sidebar group-based lazy load (TC-064/TC-066, see class doc) ----
+
+  /** Plain `<span>`, not an ARIA heading -- confirmed live, TC-064/TC-066. */
+  conversationsSectionLabel(): Locator {
+    return this.page.getByText('Conversations', { exact: true });
+  }
+
+  /**
+   * A date-group's own heading -- renders ONLY when that group's `total > 0`
+   * (confirmed live: this account's "Today" group, `total: 0`, renders no
+   * heading at all -- do not assert its presence unconditionally). Clicking
+   * the heading directly expands/collapses the group; no separate chevron
+   * icon-button target is needed (it carries no accessible name of its own).
+   */
+  groupHeading(name: 'Today' | 'This Week' | 'Older'): Locator {
+    return this.page.getByRole('heading', { name, level: 6 });
+  }
+
+  /**
+   * Every conversation row currently rendered, across every expanded group.
+   * `div[role="button"]` -- a dnd-kit draggable, confirmed live (TC-064/
+   * TC-066, via direct tag-name inspection) to NOT be a literal `<button>`
+   * element, though it carries real `role="button"` accessibility semantics
+   * and resolves identically via `getByRole('button', ...)`. Scoped under
+   * `.MuiCollapse-wrapperInner` (the per-group container) to exclude the 9
+   * unrelated sidebar-nav buttons that also carry `role="button"` page-wide
+   * -- confirmed live an unscoped `[role="button"]` query matches 25
+   * elements, not the conversation rows this needs to count.
+   */
+  conversationRows(): Locator {
+    return this.page.locator('.MuiCollapse-wrapperInner [role="button"]');
+  }
+
+  /**
+   * Expands a date-group (if currently collapsed) and, if needed, scrolls
+   * its nested container to trigger that group's group-scoped paginated
+   * follow-up fetch (`&date_group={group}&limit=10&offset=10`).
+   *
+   * **Root-caused during implementation, superseding two earlier,
+   * incorrect versions of this doc comment (kept out of the final version,
+   * see git history for the investigation trail):** each date-group
+   * heading sits beside its own dedicated chevron `<button>` (a MUI
+   * `IconButton`, no accessible name of its own) inside a `MuiCollapse`
+   * wrapper -- confirmed live via direct DOM inspection that:
+   *   1. The group genuinely starts COLLAPSED on a fresh page load/reload
+   *      (`.MuiCollapse-root` lacks the `MuiCollapse-entered` class, height
+   *      pinned to 0) -- only the heading (+ chevron) renders, zero rows.
+   *   2. Clicking the heading text DOES toggle expand/collapse (bubbles to
+   *      the same handler as the chevron button) -- confirmed by the
+   *      resulting `MuiCollapse-entered` class and the group's rows
+   *      becoming visible.
+   *   3. **The expand transition itself is what triggers the group-scoped
+   *      fetch**, not a scroll gesture -- confirmed live: clicking a
+   *      collapsed "Older" heading fired
+   *      `date_group=older&limit=10&offset=10` with no scrolling involved
+   *      at all. A separate attempt at forcing scroll-driven pagination
+   *      (via a real viewport resize, then via a forced `max-height` +
+   *      `scrollTop` write, both with a genuinely overflowing container)
+   *      produced a real scroll but never triggered a fetch -- scrolling is
+   *      not the trigger for this account's current data volume.
+   *   4. `MuiCollapse`, true to its name, does NOT unmount children on
+   *      collapse -- `.MuiCollapse-wrapperInner`'s rows remain queryable in
+   *      the DOM even while visually collapsed (clipped via `height: 0`),
+   *      which is why an earlier verification attempt that only checked
+   *      `conversationRows().count()` before/after a click could not tell
+   *      collapsed from expanded and produced a misleading "clicking does
+   *      nothing" result.
+   *
+   * The scroll-to-bottom fallback below is kept for a group whose OWN
+   * container ends up overflowing after expansion (a larger account, more
+   * than one page beyond the initial 10) -- harmless/no-op otherwise.
+   */
+  async scrollGroupToBottom(name: 'Today' | 'This Week' | 'Older'): Promise<void> {
+    const heading = this.groupHeading(name);
+    const isExpanded = await heading.evaluate((el) => {
+      const collapseRoot = el.parentElement?.nextElementSibling;
+      return collapseRoot?.classList.contains('MuiCollapse-entered') ?? false;
+    });
+    if (!isExpanded) {
+      await heading.click();
+    }
+    // Best-effort follow-up: if the now-expanded group's own container
+    // genuinely overflows (more rows than fit), scroll it to bottom too --
+    // a no-op when it doesn't (see class doc for why this account's current
+    // volume never needs it).
+    await heading.evaluate((el) => {
+      let node: HTMLElement | null = el.parentElement;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (style.overflowY === 'scroll' || style.overflowY === 'auto') {
+          if (node.scrollHeight > node.clientHeight) node.scrollTop = node.scrollHeight;
+          return;
+        }
+        node = node.parentElement;
+      }
+    });
+  }
+
+  /**
+   * Reads the authoritative expected total conversation count -- no
+   * `"Conversations: N"` badge exists anywhere in the UI (GH#89/GH#90), so
+   * this is the only count source: sum `pinned.total` + every
+   * `date_groups[].total` from the initial (non-`date_group`-scoped)
+   * `folder/prompt_lib?grouped=true` response.
+   *
+   * [PR #94 R1 fix, 2026-07-03] Default widened 20_000 -> 30_000. Hard
+   * `TimeoutError`s on this exact wait surfaced during R1 verification
+   * (TC-064's very first navigation) -- the same undersized-timeout-for-
+   * this-account's-real-data-volume defect class the reviewer flagged on
+   * `cardGridList.page.ts`'s `waitForListTotal()`, one file over. This
+   * method is a `lazy-loading` module-only addition (no other spec file
+   * calls it), so widening its default carries none of the shared-caller
+   * regression risk a cross-suite method would. 30_000 matches this file's
+   * own `waitForGroupResponse()` (below) after the same fix and the
+   * project-wide 30s live-backend-wait ceiling `tests/lazy-loading.spec.ts`
+   * TC-064's own settle-wait already established.
+   */
+  async waitForGroupedTotal(timeout = 30_000): Promise<{ total: number; body: GroupedConversationsResponse }> {
+    const response = await this.page.waitForResponse(
+      (r) =>
+        /\/folder\/prompt_lib\/\d+/.test(r.url()) &&
+        r.url().includes('grouped=true') &&
+        !r.url().includes('date_group=') &&
+        r.status() === 200,
+      { timeout },
+    );
+    const body = (await response.json()) as GroupedConversationsResponse;
+    const total = (body.pinned?.total ?? 0) + (body.date_groups ?? []).reduce((sum, g) => sum + (g.total ?? 0), 0);
+    return { total, body };
+  }
+
+  /**
+   * Waits for a specific date-group's own group-scoped paginated fetch
+   * (`&date_group={group}&offset=10...`) -- fires only once that group's
+   * own nested container is expanded and scrolled to bottom.
+   *
+   * [PR #94 R1 fix, 2026-07-03] Default widened 15_000 -> 30_000, same
+   * rationale as `waitForGroupedTotal()` immediately above -- module-only
+   * caller (`tests/lazy-loading.spec.ts`), no shared-caller regression risk.
+   */
+  async waitForGroupResponse(dateGroup: 'today' | 'this_week' | 'older', timeout = 30_000): Promise<Response> {
+    return this.page.waitForResponse(
+      (r) =>
+        /\/folder\/prompt_lib\/\d+/.test(r.url()) &&
+        r.url().includes(`date_group=${dateGroup}`) &&
+        r.status() === 200,
+      { timeout },
+    );
+  }
+}
+
+/** Shape of `GET .../folder/prompt_lib/{ownerId}?...grouped=true` (and its
+ * `&date_group={group}` follow-up variant, which uses the same nested
+ * shape without the outer `date_groups` array) -- see `waitForGroupedTotal()`
+ * and `waitForGroupResponse()` above. */
+export interface GroupedConversationsResponse {
+  pinned?: { total?: number };
+  date_groups?: Array<{ name?: string; total?: number; conversations?: Array<{ id?: number }> }>;
 }
