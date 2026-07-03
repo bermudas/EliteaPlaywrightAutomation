@@ -401,7 +401,7 @@ test.describe('@artifacts', () => {
 
       await test.step('9. Sent message shows the attachment card', async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.attachmentFileCard('test-document.pdf')).toBeVisible();
+        await expect(artifacts.attachmentFileCard(messageText, 'test-document.pdf')).toBeVisible();
       });
 
       await test.step("10-11. Assistant reply demonstrably quotes the PDF's own embedded text; no error/rejection UI anywhere", async () => {
@@ -472,7 +472,7 @@ test.describe('@artifacts', () => {
 
       await test.step('9. Sent message shows the attachment card', async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.attachmentFileCard('test-notes.txt')).toBeVisible();
+        await expect(artifacts.attachmentFileCard(messageText, 'test-notes.txt')).toBeVisible();
       });
 
       await test.step("10-11. Assistant reply demonstrably quotes the file's own content; no error/rejection UI anywhere", async () => {
@@ -550,7 +550,7 @@ test.describe('@artifacts', () => {
 
       await test.step('8. Sent message carries no attachment card', async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.attachmentFileCard()).toHaveCount(0);
+        await expect(artifacts.attachmentFileCard(messageText)).toHaveCount(0);
       });
 
       await test.step('9-10. Artifacts bucket has no trace of the oversized file', async () => {
@@ -989,7 +989,7 @@ test.describe('@artifacts', () => {
 
       await test.step('9. Sent message has text only, no attachment card', async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.attachmentFileCard()).toHaveCount(0);
+        await expect(artifacts.attachmentFileCard(messageText)).toHaveCount(0);
       });
 
       await test.step("10-11. Assistant reply renders; no error/rejection UI anywhere (live, confirmed contract -- GH#113 tracks the UX gap, not asserted as a failure here)", async () => {

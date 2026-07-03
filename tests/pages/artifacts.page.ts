@@ -350,18 +350,80 @@ export class ArtifactsPage {
     return this.chatMessageItems().filter({ hasText: messageText });
   }
 
-  /** Image-attachment thumbnail -- renders as a bare `<img>` with the
+  /**
+   * Image-attachment thumbnail -- renders as a bare `<img>` with the
    * filename as its accessible name, no wrapping `data-testid` (confirmed
    * for images specifically; non-image attachments get `chat-artifact-file-card`
-   * instead, see below). */
+   * instead, see below).
+   *
+   * `.last()` disambiguates a transient two-node coexistence (TC-043: a bare
+   * `getByRole('img', { name })` query hit a Playwright strict-mode
+   * violation, 2 elements, during a 10-image batch send) WITHOUT risking a
+   * regression on the single-image path.
+   *
+   * Root-caused across TWO fix attempts in this debugging pass -- documented
+   * because the first attempt's own reasoning was concretely disproven, not
+   * just superseded:
+   *
+   * 1. First attempt excluded a `blob:`-prefixed `src` (hypothesis: the
+   *    thumbnail mounts as a transient client-side `blob:` preview, then
+   *    settles to a `data:` URI, confirmed via `playwright-cli` + a
+   *    `MutationObserver` probe against the live app). The self-axis XPath
+   *    technique itself was verified correct in isolation (a throwaway
+   *    Playwright test against static HTML, this project's own installed
+   *    1.61.1, confirmed the exclusion filter behaves exactly as intended).
+   *    But run against the REAL suite, EVERY single-image call site that
+   *    was previously rock-solid (TC-030/034/035/036/037/039/041/042) newly
+   *    failed with "element(s) not found" after the full 5000ms default
+   *    timeout -- a systemic, 100%-reproducible break, not a narrow one.
+   *    Root cause of the hypothesis's failure: the manual exploration that
+   *    produced it sampled the DOM via `playwright-cli`, where each sample
+   *    carries multi-second CLI-process round-trip overhead -- that overhead
+   *    incidentally gave the live app far more real wall-clock settle time
+   *    between samples than a bare 5000ms Playwright `expect` timeout ever
+   *    grants under a real test run's tracing/screenshot overhead. The
+   *    *direction* observed (blob first, data: later) may still be real,
+   *    but the *timing* it was based on cannot be trusted, and excluding
+   *    `blob:` outright turned a normally-instant assertion into a wait for
+   *    a settle that does not reliably land inside any one test's timeout.
+   * 2. `.last()` is the corrected, evidence-conservative fix: mathematically
+   *    a no-op when the locator matches exactly one element (every
+   *    single-image call site -- cannot newly regress any of the 9 tests
+   *    the first attempt broke), while still resolving the one CONFIRMED
+   *    failure mode from the original report (TC-043's real strict-mode
+   *    2-element violation) by preferring whichever node is last in DOM
+   *    order.
+   */
   messageThumbnail(fileName: string): Locator {
-    return this.page.getByRole('img', { name: fileName });
+    return this.page.getByRole('img', { name: fileName }).last();
   }
 
-  /** Non-image attachment card (PDF/TXT/etc, TC-031/TC-032) -- optionally
-   * filtered by filename text when disambiguating among multiple cards. */
-  attachmentFileCard(fileName?: string): Locator {
-    const card = this.page.getByTestId('chat-artifact-file-card');
+  /**
+   * Non-image attachment card (PDF/TXT/etc, TC-031/TC-032/TC-033/TC-038) --
+   * scoped to the given message's own row via `userMessageRow()`, NOT a
+   * page-wide query.
+   *
+   * Root-caused during this debugging pass -- the same staleness class
+   * already documented on `assistantReply()`'s own doc comment: a bare
+   * page-wide `getByTestId('chat-artifact-file-card')` query can match a
+   * stale card left over from an earlier conversation/test resurfacing in
+   * the DOM during `gotoChat()`'s restore-then-clear window. Confirmed live
+   * (TC-033, run-2 evidence) to cause `toHaveCount(0)` -- asserting NO
+   * attachment card on a deliberately text-only follow-up message -- to
+   * find 1 stale card instead of 0. Confirmed live via direct DOM
+   * inspection (2026-07-03, `playwright-cli`, a fresh isolated conversation
+   * carrying a real PDF attachment): the card is a genuine descendant (4
+   * DOM levels down, confirmed by walking up from the card to its nearest
+   * `chat-message-item` ancestor) of the SENDING user's own message row --
+   * not the assistant's reply row (contrast `assistantReply()`, which scopes
+   * to the reply's *sibling* row instead). Scoping to `userMessageRow()`
+   * directly is therefore both the semantically-correct question ("does
+   * THIS message carry a card") and immune to any number of stale/leftover
+   * cards elsewhere in the DOM, matching `assistantReply()`'s own proven
+   * fix from the prior round.
+   */
+  attachmentFileCard(messageText: string, fileName?: string): Locator {
+    const card = this.userMessageRow(messageText).getByTestId('chat-artifact-file-card');
     return fileName ? card.filter({ hasText: fileName }) : card;
   }
 
