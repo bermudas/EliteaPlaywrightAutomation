@@ -1,0 +1,70 @@
+name: Playwright Tests
+
+# Manual trigger only, per explicit operator scoping (see .agents/testing.md
+# § CI integration). Do NOT add push/pull_request triggers here without a
+# separate, explicit decision — that's an intentionally later step, not an
+# oversight.
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run @smoke + module suites
+    runs-on: ubuntu-latest
+    # Environment "Next" (operator-created) supplies ELITEA_EMAIL/ELITEA_PASSWORD
+    # secrets and the BASE_URL variable consumed below.
+    environment: Next
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # No .nvmrc / package.json "engines" pinned a version at time of
+          # writing — 20 is current Node LTS and matches what @playwright/test
+          # ^1.48.0 is validated against.
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers (chromium only)
+        # playwright.config.ts only configures the `chromium` project —
+        # installing other browsers here would be dead weight.
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright suite
+        # Same command a developer runs locally (.agents/testing.md § Run
+        # commands) — reproducibility over cleverness. GitHub Actions sets
+        # CI=true automatically, so playwright.config.ts's existing
+        # `retries: process.env.CI ? 2 : 0` applies without any extra flag.
+        # A red result here can be CORRECT — several suites carry known,
+        # documented product defects (e.g. GH#29, GH#43) that are expected
+        # to fail every run until the product fixes them. Do not add any
+        # step that skips/xfails those tests to force a green run.
+        run: npx playwright test
+        env:
+          BASE_URL: ${{ vars.BASE_URL }}
+          ELITEA_EMAIL: ${{ secrets.ELITEA_EMAIL }}
+          ELITEA_PASSWORD: ${{ secrets.ELITEA_PASSWORD }}
+
+      - name: Upload HTML report
+        # if: always() so a failing/red run (including the expected
+        # known-defect reds above) still produces a downloadable report.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-html-report
+          path: test-results/reports
+          retention-days: 30
+
+      - name: Upload JSON report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-json-report
+          path: test-results/json
+          retention-days: 30
