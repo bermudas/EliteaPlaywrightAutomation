@@ -45,6 +45,31 @@ export default defineConfig({
     // column count) -- keeping automation on the same resolution avoids
     // introducing a new, unexplored viewport-dependent variable.
     viewport: { width: 1920, height: 1080 },
+    // Diagnosed from run 28658801255 (this PR's own first two CI runs): a
+    // distinct infra-instability bucket -- repeated "Target page, context or
+    // browser has been closed" crashes and fields reading back empty right
+    // after .fill() -- separate from the correctly-red known-defect tests
+    // (GH#29, GH#72, ...). Consistent with Chromium exhausting /dev/shm on
+    // GitHub's ubuntu-latest runners (default 64MB shared-memory mount,
+    // small next to a 1920x1080 viewport under load); explicit here per
+    // operator request as defense-in-depth.
+    //
+    // VERIFIED CAVEAT (do not remove without re-checking): Playwright's own
+    // chromium launcher already hardcodes this exact flag unconditionally
+    // for every launch, on every OS (node_modules/playwright-core/lib/
+    // coreBundle.js, `chromiumSwitches`) -- confirmed via
+    // `DEBUG=pw:browser npx playwright test ...`, which shows
+    // `--disable-dev-shm-usage` in the resolved command line with or
+    // without this block. So this line is a harmless duplicate (Chromium
+    // ignores repeated flags), not something that was missing before. It
+    // does NOT explain the infra-crash bucket in 28658801255 by itself --
+    // that flag was already active on that run. Kept per operator request;
+    // if the infra-crash bucket persists on the next run, the real cause is
+    // still open (candidates: runner resource pressure under `workers: 1`
+    // + `retries: 2`, not literally /dev/shm).
+    launchOptions: {
+      args: ['--disable-dev-shm-usage'],
+    },
   },
   projects: [
     {
