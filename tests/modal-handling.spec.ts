@@ -151,7 +151,21 @@ test.describe('@modal-handling', () => {
   // Several real sequential network round-trips per case (conversation
   // create/delete lifecycle, agent detail reload) against the shared live
   // environment -- same rationale as tests/agents.spec.ts/pipelines.spec.ts.
-  test.describe.configure({ timeout: 60_000 });
+  //
+  // Bumped 60_000 -> 120_000 (PR #70 review round 1 re-verification,
+  // 2026-07-03): TC-052/TC-055's fixture create+cancel+delete lifecycle
+  // chains FOUR independent live-backend waits that can each legitimately
+  // take up to 15s under load (createFixture()'s new race-guard wait, its
+  // PUT-confirmation wait, its final rename-visibility check, and
+  // deleteFixture()'s own final removal check) -- confirmed live via trace:
+  // one re-verification run observed a single PUT response alone taking
+  // ~13.3s. The previous 60s budget was sized for the pre-fix flow (a single
+  // 5s-timeout visibility check); the fix in `conversation.page.ts` trades a
+  // real leak/race for legitimately longer worst-case wait chains, so the
+  // suite-level budget needs matching headroom. Applies to all 6 tests in
+  // this file for consistency (harmless for the faster ones -- it only
+  // matters when something is actually slow).
+  test.describe.configure({ timeout: 120_000 });
 
   test('TC-050: close conversation not found modal', async ({ authenticatedPage: page }) => {
     const console_ = trackConsoleErrors(page);
@@ -255,6 +269,13 @@ test.describe('@modal-handling', () => {
     const fixtureName = `TC052_Cancel_Fixture_${Date.now()}`;
     let fixtureCreated = false;
 
+    // Registered BEFORE the navigation below fires -- `page.goto()` is a full
+    // (not client-side) navigation, so the folder list GET happens once as
+    // part of this exact page load. Awaited in step 3.
+    const folderListResponse = page.waitForResponse(
+      (r) => /\/elitea_core\/folder\/prompt_lib\/\d+/.test(r.url()) && r.status() === 200,
+    );
+
     try {
       await test.step('1-2. Navigate to /app/chat/all, dismiss the "Conversation not found" dialog that deterministically intervenes first (GH#67 -- a different modal than this case\'s own subject)', async () => {
         await page.goto(`${env.BASE_URL}/app/chat/all`);
@@ -262,12 +283,22 @@ test.describe('@modal-handling', () => {
       });
 
       await test.step('3. Sidebar conversation list is present', async () => {
+        // Tightened per PR #70 review nit: wait on the authoritative list
+        // response (the AFS-recommended handle), not just element visibility
+        // -- previously masked (harmlessly) by createFixture()'s own network
+        // waits immediately after, but this is the correct, direct signal.
+        await folderListResponse;
         await expect(page.getByText('Conversations')).toBeVisible();
       });
 
       await test.step('Setup: create a disposable conversation fixture (data-collision guard -- exercises the full cancel-survives lifecycle without risking shared/pre-existing conversations)', async () => {
-        await conversations.createFixture(fixtureName);
-        fixtureCreated = true;
+        // Cleanup is registered via the onCreated callback, fired as soon as
+        // the conversation is confirmed real server-side -- guaranteed even
+        // if createFixture()'s own trailing UI-visibility check is slow/fails
+        // (PR #70 review round 1, finding 2).
+        await conversations.createFixture(fixtureName, () => {
+          fixtureCreated = true;
+        });
       });
 
       await test.step('4-6. Open the fixture row\'s kebab menu, click "Delete" -- the conversation-specific delete-confirmation dialog opens', async () => {
@@ -412,8 +443,13 @@ test.describe('@modal-handling', () => {
       });
 
       await test.step('Setup: create a disposable conversation fixture (data-collision guard, this module\'s high-parallelism convention -- avoids mutating shared/pre-existing conversations)', async () => {
-        await conversations.createFixture(fixtureName);
-        fixtureCreated = true;
+        // Cleanup is registered via the onCreated callback, fired as soon as
+        // the conversation is confirmed real server-side -- guaranteed even
+        // if createFixture()'s own trailing UI-visibility check is slow/fails
+        // (PR #70 review round 1, finding 2).
+        await conversations.createFixture(fixtureName, () => {
+          fixtureCreated = true;
+        });
       });
 
       const deleteWatcher = trackConversationDeleteRequests(page);
@@ -497,7 +533,15 @@ test.describe('@modal-handling', () => {
 
       await test.step('8. Original tab is completely untouched -- "Name" field still contains "TEST_"', async () => {
         await expect(page).toHaveURL(/\/app\/agents\/create\?viewMode=owner/);
-        await expect(form.nameInput).toHaveValue('TEST_');
+        // Known defect: GH#72 -- root-caused during PR #70 review round 1.
+        // Intermittently (~20%) the field genuinely clears (a settled empty
+        // value, not a slow-render race) when a second tab in the same
+        // context does background work; ruled out visibilitychange/blur as
+        // the mechanism, confirmed unrelated to GH#71 (createFixture()'s own
+        // race -- this test never calls into that code path). Soft-asserted
+        // per the isolated-step-defect handling rule: the rest of this test
+        // (re-fill + save) still validates the full functional flow.
+        await expect.soft(form.nameInput, 'Known defect: GH#72').toHaveValue('TEST_');
       });
 
       await test.step('9-10. Dismiss the modal in the second tab, close it -- no navigation ever occurred in the original tab, so there is nothing to "navigate back" to', async () => {
@@ -507,7 +551,10 @@ test.describe('@modal-handling', () => {
       });
 
       await test.step('11. Original tab: "Name" field still contains "TEST_" -- form state fully preserved (the new-tab variant\'s confirmed branch; the alternative "field is empty" branch is only reachable via the same-window variant, GH#68, not exercised here)', async () => {
-        await expect(form.nameInput).toHaveValue('TEST_');
+        // Known defect: GH#72 -- see step 8's comment above. Soft-asserted
+        // for the same reason; step 12 re-fills the field unconditionally
+        // regardless of this assertion's outcome.
+        await expect.soft(form.nameInput, 'Known defect: GH#72').toHaveValue('TEST_');
       });
 
       await test.step('12. Re-fill "Name" with the full generated value', async () => {

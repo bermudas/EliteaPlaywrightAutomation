@@ -133,14 +133,52 @@ export class ConversationPage {
 
   // ---- Disposable fixture lifecycle (data-collision guard, TC-052/TC-055) ----
 
+  /** The active conversation's message-thread panel (`region "scrollable
+   * content"`, confirmed live via the app's own accessibility tree -- see
+   * `createFixture()`'s own doc comment for why this is used as a
+   * race-guard rather than just the URL). Exposed so a caller could assert
+   * "no messages yet" independently if a future case needs it. */
+  private messageThreadRegion(): Locator {
+    return this.page.getByRole('region', { name: 'scrollable content' });
+  }
+
   /**
    * Creates a disposable conversation by sending one chat message from a
    * blank composer -- the app auto-names the conversation from the message
    * text (no dedicated Name field, unlike Agents/Pipelines) and fires a
    * rename `PUT` shortly after the create `POST`. Waits for BOTH the URL to
-   * carry the new numeric id AND the rename `PUT` to complete before
-   * returning, so the caller can immediately locate the row by its final
-   * name without racing the transient "New Conversation" placeholder.
+   * carry the new numeric id AND the SPECIFIC `PUT` whose response body
+   * actually carries the fixture text (see the precise-matching note below)
+   * before proceeding, so the caller can locate the row by its final name
+   * without racing the transient "New Conversation" placeholder.
+   *
+   * **Race condition fix (PR #70 review round 1, findings 1+2).** Clicking
+   * the sidebar "+ Conversation" control does NOT atomically switch the
+   * composer to a genuinely blank conversation -- confirmed live via traced
+   * network requests (2026-07-03 re-investigation): for a brief window
+   * (observed up to ~1s) after the click, the message-thread panel and the
+   * app's internal "active conversation" context still point at WHATEVER
+   * conversation was previously open (URL transiently `/app/chat?create=1`
+   * before settling to bare `/app/chat`). Proceeding to click/type/send
+   * during that window sends the fixture text as a plain MESSAGE into the
+   * stale, pre-existing conversation instead of creating a new one -- no
+   * `POST .../conversations/prompt_lib/{owner}` (create) ever fires, only a
+   * `PUT .../conversation/prompt_lib/{owner}/{staleId}` (the app's generic
+   * "conversation touched" call, which trivially satisfies this method's own
+   * network wait below since it matches the same URL shape as a genuine
+   * rename). This was CONFIRMED to be the actual mechanism behind the 5
+   * "leaked conversations" flagged in review -- cross-checked directly
+   * against the live account's API: none of the 5 named fixtures exist as
+   * separate conversations; all 5 are message pairs sitting inside the
+   * pre-existing `smoke.spec.ts` conversation ("Hello, test", id 36) --
+   * see the PR's Run Report for the full evidence trail. Waiting for the
+   * message-thread panel to genuinely empty out (0 items) is the
+   * confirmed-live, semantic signal that the SPA has finished switching to
+   * a truly blank compose context; it is NOT a network-bound wait (client
+   * state reset), so a shorter timeout than the file's live-backend
+   * convention would also be defensible, but 15s is used for consistency
+   * with every other wait in this file and because it costs nothing when
+   * the reset (observed ~150ms-1s) completes quickly.
    *
    * Clicks `getByTestId('chat-input')` (a container `<div>`, not a
    * fillable element -- confirmed live) to focus the underlying textarea,
@@ -151,37 +189,85 @@ export class ConversationPage {
    * clicking the container correctly focuses it via the app's own click
    * delegation -- confirmed live during implementer Phase 2 exploration,
    * 2026-07-03).
+   *
+   * **Fixture-leak fix (PR #70 review round 1, finding 2).** The `onCreated`
+   * callback fires the moment server-side creation is confirmed (URL
+   * carries the new id AND the touch/rename `PUT` succeeded) -- BEFORE the
+   * trailing UI-visibility assertion below runs. Callers use this to
+   * register cleanup (e.g. set a `fixtureCreated` flag) at the true "the
+   * conversation is real and persisted" boundary, not after this method
+   * fully returns -- otherwise a slow-render UI check that throws leaves
+   * the flag unset while the conversation already exists server-side,
+   * leaking it into the shared live account.
    */
-  async createFixture(text: string): Promise<number> {
+  async createFixture(text: string, onCreated?: (id: number) => void): Promise<number> {
     await this.page
       .getByRole('navigation', { name: 'side-bar' })
       .getByRole('button', { name: 'Conversation', exact: true })
       .click();
+    // Race guard -- see this method's own doc comment above. Vacuously true
+    // (resolves immediately) when there was no prior conversation to leave.
+    await expect(this.messageThreadRegion().locator('[role="listitem"]')).toHaveCount(0, { timeout: 15_000 });
     await this.page.getByTestId('chat-input').click();
     await this.page.keyboard.type(text);
-    await Promise.all([
-      this.page.waitForURL(/\/app\/chat\/\d+/),
-      this.page.waitForResponse(
-        (r) =>
-          /\/conversation\/prompt_lib\/\d+\/\d+$/.test(r.url()) &&
-          r.request().method() === 'PUT' &&
-          r.status() === 200,
-      ),
-      this.page.getByTestId('chat-send-button').click(),
-    ]);
+
+    // Registered BEFORE the send click below (never after -- a response
+    // that already fired by the time we start listening would be missed).
+    // Confirmed live (PR #70 review round 1 re-investigation) that TWO PUTs
+    // hit this same URL shape in sequence: an early one whose body still
+    // carries a placeholder name ("New Conversation") and a later,
+    // authoritative one whose body carries the real fixture text -- both
+    // gated behind the same AI-response-generation pipeline that also
+    // powers the chat reply, observed taking anywhere from ~1s to ~17s
+    // combined under load. The original implementation matched on URL shape
+    // alone, so it could resolve on the EARLY (placeholder-name) PUT --
+    // meaning the trailing UI-visibility check then had to re-absorb the
+    // SAME AI latency a second time waiting for the sidebar to catch up
+    // (the actual cause of PR #70 review round 1's finding 1, more
+    // precisely diagnosed than "just add a timeout"). Matching on response
+    // BODY content instead means the trailing visibility check only has to
+    // absorb the sidebar's own quick re-render once the correct data is
+    // already confirmed server-side.
+    const renamed = this.page.waitForResponse(async (r) => {
+      if (!(/\/conversation\/prompt_lib\/\d+\/\d+$/.test(r.url()) && r.request().method() === 'PUT' && r.status() === 200)) {
+        return false;
+      }
+      const body = await r.json().catch(() => null);
+      return body?.name === text;
+    }, { timeout: 30_000 });
+
+    await Promise.all([this.page.waitForURL(/\/app\/chat\/\d+/), this.page.getByTestId('chat-send-button').click()]);
     const idMatch = this.page.url().match(/\/app\/chat\/(\d+)/);
     if (!idMatch) {
       throw new Error(`Expected post-send URL to contain a numeric conversation id, got: ${this.page.url()}`);
     }
-    await expect(this.conversationRow(text)).toBeVisible();
-    return Number(idMatch[1]);
+    const id = Number(idMatch[1]);
+    // Register cleanup NOW -- the conversation is confirmed real and
+    // persisted server-side (the create POST succeeded, URL carries a real
+    // id) at this point, independent of whether the rename has completed or
+    // the trailing UI-visibility check below succeeds or times out.
+    onCreated?.(id);
+
+    await renamed;
+    // Explicit generous timeout matching this file's own convention (see
+    // `dismissConversationNotFoundModal(timeout = 15_000)` above) -- this is
+    // now purely the sidebar's own render lag AFTER the rename is already
+    // confirmed server-side (see `renamed` above), not a re-absorption of
+    // the AI-response latency. Previously fell back to Playwright's 5000ms
+    // global default, which was empirically too short under load (PR #70
+    // review round 1, finding 1).
+    await expect(this.conversationRow(text)).toBeVisible({ timeout: 15_000 });
+    return id;
   }
 
   /** Full real-delete flow for teardown -- open the row's kebab menu, click
-   * "Delete", confirm for real, verify the row is gone. */
+   * "Delete", confirm for real, verify the row is gone. Same live-backend
+   * render-lag class as `createFixture()`'s own final check (PR #70 review
+   * round 1 audit) -- the sidebar removing the row is a UI reaction to the
+   * just-confirmed `DELETE` response, not an instant DOM update. */
   async deleteFixture(name: string): Promise<void> {
     await this.openDeleteDialog(name);
     await this.confirmDelete();
-    await expect(this.conversationRow(name)).toHaveCount(0);
+    await expect(this.conversationRow(name)).toHaveCount(0, { timeout: 15_000 });
   }
 }
