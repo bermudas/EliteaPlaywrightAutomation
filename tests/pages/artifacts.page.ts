@@ -393,9 +393,25 @@ export class ArtifactsPage {
    *    failure mode from the original report (TC-043's real strict-mode
    *    2-element violation) by preferring whichever node is last in DOM
    *    order.
+   *
+   * **Post-merge review fix**: row-scoped via an optional `messageText`,
+   * matching its siblings `assistantReply()`/`attachmentFileCard()` (both of
+   * which scope to `userMessageRow()` for the identical reason -- immunity
+   * to a stale/leftover attachment resurfacing from an earlier conversation
+   * during `gotoChat()`'s restore-then-clear window, see
+   * `attachmentFileCard()`'s own doc comment). Previously this stayed
+   * page-wide and only worked because `startNewConversation()` guarantees a
+   * cleared thread before every call site's own first interaction -- an
+   * invariant nothing enforces long-term (a future call site reusing an
+   * existing conversation, or a change to the restore-then-clear timing,
+   * would silently reintroduce the exact staleness class already fixed for
+   * the other two). `.last()` is kept even when scoped -- it's still cheap
+   * insurance against the CONFIRMED same-row 2-element coexistence above,
+   * which row-scoping alone does not address.
    */
-  messageThumbnail(fileName: string): Locator {
-    return this.page.getByRole('img', { name: fileName }).last();
+  messageThumbnail(fileName: string, messageText?: string): Locator {
+    const scope = messageText ? this.userMessageRow(messageText) : this.page;
+    return scope.getByRole('img', { name: fileName }).last();
   }
 
   /**
@@ -484,9 +500,12 @@ export class ArtifactsPage {
    * to be a Playwright-actionability-vs-real-hit-testing false positive, not
    * a real user-facing defect -- `force: true` is the confirmed, permanent,
    * correct automation pattern regardless.
+   *
+   * `messageText`, when given, is forwarded to `messageThumbnail()` for
+   * row-scoping (see that method's own "post-merge review fix" doc comment).
    */
-  async openThumbnailPreview(fileName: string): Promise<void> {
-    await this.messageThumbnail(fileName).click({ force: true });
+  async openThumbnailPreview(fileName: string, messageText?: string): Promise<void> {
+    await this.messageThumbnail(fileName, messageText).click({ force: true });
     await expect(this.previewModal()).toBeVisible();
   }
 
