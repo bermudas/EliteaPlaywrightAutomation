@@ -134,13 +134,58 @@ const test = base.extend<{ authenticatedPage: Page }, { artifactsStorageState: S
   },
 });
 
-/** Local, gitignored, pre-generated fixture files shared across this module
- * (per `.agents/test-automation.yaml` § additional_sources note) --
- * `Elitea-testing-WebQAPreExecuted/Elitea_test_data/artifacts/*`. */
-const FIXTURES_DIR = path.resolve(__dirname, '..', 'Elitea-testing-WebQAPreExecuted', 'Elitea_test_data', 'artifacts');
+/**
+ * Committed fixture files shared across this module -- `tests/fixtures/artifacts/`.
+ *
+ * **Post-merge review fix (PR #123 follow-up)**: this module originally
+ * pointed at the gitignored, local-only
+ * `Elitea-testing-WebQAPreExecuted/Elitea_test_data/artifacts/*` directory
+ * (per `.agents/test-automation.yaml` § additional_sources) -- which meant
+ * the fixtures this suite depends on were never committed, so the entire
+ * `@artifacts` suite could not run in CI at all (every `fixturePath()` call
+ * resolved to a path that didn't exist on a fresh checkout). Compounding
+ * this, `.gitignore` carried a case-typo (`webQAPreExecuted` vs. the real
+ * `WebQAPreExecuted`) that happened to make the gap invisible locally --
+ * macOS defaults to a case-insensitive filesystem/git config
+ * (`core.ignorecase=true`), so `git check-ignore` reported a match despite
+ * the pattern being wrong; the project's actual CI runner (`ubuntu-latest`)
+ * is case-sensitive, so the directory was never actually ignored there
+ * either -- moot only because nothing referenced it from a committed path.
+ * Fixed by establishing `tests/fixtures/artifacts/` as this project's first
+ * committed-binary-fixture convention (no prior precedent existed) and
+ * copying the byte-identical files the module actually needs (verified via
+ * SHA-256 against the original WebQAPreExecuted copies) so `actions/
+ * checkout` alone makes them available in CI -- no separate provisioning
+ * step required. `test-large-image.png` (27MB, TC-033 only) is deliberately
+ * NOT among the copied files -- see `buildOversizedImagePayload()` below.
+ */
+const FIXTURES_DIR = path.resolve(__dirname, 'fixtures', 'artifacts');
 
 function fixturePath(fileName: string): string {
   return path.join(FIXTURES_DIR, fileName);
+}
+
+/**
+ * Builds an in-memory oversized PNG `FilePayload` for TC-033's size-limit
+ * rejection test, instead of committing a 27MB binary fixture to the repo.
+ * Seeds from the genuinely-valid, already-committed `test-image-small.png`
+ * and pads its raw bytes with zero-filled filler -- this app's own
+ * size-limit check is confirmed (TC-033's AFS, § Network Behavior) to be an
+ * immediate, client-side, no-server-round-trip rejection based on the
+ * `File`/`Blob`'s own byte length, not on decoding pixel content, so a
+ * decodable-past-IEND-or-not PNG makes no difference to the assertion under
+ * test (the toast's exact wording/threshold-number is asserted via a shape
+ * regex, per TC-033's own AFS Axis-2 addition, precisely so it doesn't
+ * depend on today's specific enforced limit). `targetBytes` only needs to
+ * clear whatever threshold is live (confirmed 3MB as of this AFS, previously
+ * documented as high as 5MB/20MB depending on source -- see GH#115) with
+ * comfortable margin; 4MB does that without the repo/CI cost of a
+ * multi-megabyte fixture, committed or generated-to-disk.
+ */
+function buildOversizedImagePayload(fileName: string, targetBytes: number): { name: string; mimeType: string; buffer: Buffer } {
+  const seed = fs.readFileSync(fixturePath('test-image-small.png'));
+  const buffer = seed.length >= targetBytes ? seed : Buffer.concat([seed, Buffer.alloc(targetBytes - seed.length, 0)]);
+  return { name: fileName, mimeType: 'image/png', buffer };
 }
 
 /**
@@ -308,7 +353,7 @@ test.describe('@artifacts', () => {
 
       await test.step('8. Sent message row shows the text and the attachment thumbnail', async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.messageThumbnail('test-image-small.png')).toBeVisible();
+        await expect(artifacts.messageThumbnail('test-image-small.png', messageText)).toBeVisible();
       });
 
       await test.step("9. Assistant's reply demonstrably describes the actual uploaded image content", async () => {
@@ -317,11 +362,22 @@ test.describe('@artifacts', () => {
         // streams in -- a one-shot `.textContent()` read right after
         // visibility raced an empty placeholder. `toContainText()` polls
         // until real content lands, the correct condition-wait here.
-        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
+        //
+        // Post-merge review fix: a bare `/\S/` regex only proves SOME text
+        // arrived, not that the model genuinely processed the image -- this
+        // AFS's own § Axis 2 explicitly calls for "the strongest available
+        // proof the image was genuinely processed server-side," matching
+        // TC-031/032/040/041's content-specific assertions. The fixture
+        // (`test-image-small.png`, `generate_test_images.py`) renders the
+        // literal text "Test Small" on a blue background -- a vision model
+        // reading the image reliably transcribes that literal text (this
+        // AFS's own observed run: "a solid blue background with the text
+        // 'Test Small'... centered near the lower-middle area").
+        await expect(artifacts.assistantReply(messageText)).toContainText(/Test Small/i, { timeout: 30_000 });
       });
 
       await test.step('10. Thumbnail is previewable via a forced click (GH#117 -- a plain click times out)', async () => {
-        await artifacts.openThumbnailPreview('test-image-small.png');
+        await artifacts.openThumbnailPreview('test-image-small.png', messageText);
         await expect(artifacts.previewModal()).toContainText('test-image-small.png');
         await artifacts.closePreviewModal();
       });
@@ -462,6 +518,11 @@ test.describe('@artifacts', () => {
 
       await test.step('6. Attachment chip renders -- no rejection at the picker layer', async () => {
         await expect(artifacts.preSendChip('test-notes.txt')).toBeVisible();
+        // Post-merge review nit fix: this AFS's own step 4-5 Verify calls out
+        // the "Attach Files (N left)" counter decrementing by exactly 1
+        // (10 -> 9) -- `attachCounterText()` already exists and is used
+        // correctly elsewhere in this module but wasn't called here.
+        await expect(artifacts.attachCounterText()).toHaveAccessibleName(/9 left/);
       });
 
       let upload: Awaited<ReturnType<typeof sendAndCaptureUpload>>;
@@ -502,7 +563,11 @@ test.describe('@artifacts', () => {
   }) => {
     const console_ = trackConsoleErrors(page);
     const artifacts = new ArtifactsPage(page);
-    const filePath = fixturePath('test-large-image.png');
+    // In-memory oversized-PNG payload -- see `buildOversizedImagePayload()`'s
+    // own doc comment for why this replaced the previously-committed 27MB
+    // `test-large-image.png` binary (post-merge review fix, PR #123
+    // follow-up).
+    const oversizedFile = buildOversizedImagePayload('test-large-image.png', 4 * 1024 * 1024);
     const messageText = uniqueMessage('Test large file rejection');
     // Native beforeunload dialog on navigating away from an active chat --
     // first confirmed on a Chat route (not just dirty Agent/Pipeline CRUD
@@ -525,7 +590,7 @@ test.describe('@artifacts', () => {
       await test.step('4-5. Select the oversized fixture -- immediate client-side rejection, no server round trip', async () => {
         const menu = await artifacts.openAttachMenu();
         const [fileChooser] = await Promise.all([page.waitForEvent('filechooser'), artifacts.attachFilesMenuItem(menu).click()]);
-        await fileChooser.setFiles(filePath);
+        await fileChooser.setFiles(oversizedFile);
         const toast = page.getByRole('alert');
         await expect(toast).toBeVisible();
         await expect(toast).toContainText(/exceeds the \d+(\.\d+)? MB image size limit/i);
@@ -588,8 +653,11 @@ test.describe('@artifacts', () => {
         expect(upload.fileSize).toBe(7938);
       });
 
+      let thumbnailBox: { width: number; height: number } | null = null;
       await test.step('8. Thumbnail renders at good visual quality', async () => {
-        await expect(artifacts.messageThumbnail('test-preview-image.png')).toBeVisible();
+        const thumbnail = artifacts.messageThumbnail('test-preview-image.png', messageText);
+        await expect(thumbnail).toBeVisible();
+        thumbnailBox = await thumbnail.boundingBox();
       });
 
       // Root-caused during this debugging pass (not documented by the AFS,
@@ -611,10 +679,31 @@ test.describe('@artifacts', () => {
         await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
       });
 
-      await test.step('9-10. Force-click opens a genuine preview dialog with filename, enlarged image, and the three action buttons', async () => {
-        await artifacts.openThumbnailPreview('test-preview-image.png');
+      await test.step('9-10. Force-click opens a genuine preview dialog with filename, enlarged image (visibly larger than the inline thumbnail), and the three action buttons', async () => {
+        await artifacts.openThumbnailPreview('test-preview-image.png', messageText);
         await expect(artifacts.previewModal()).toContainText('test-preview-image.png');
-        await expect(artifacts.previewModal().getByRole('img', { name: 'test-preview-image.png' })).toBeVisible();
+        const modalImage = artifacts.previewModal().getByRole('img', { name: 'test-preview-image.png' });
+        await expect(modalImage).toBeVisible();
+        // Post-merge review fix: the AFS claims "renders correctly at larger
+        // size (not broken, full quality, visible in viewport)" and its own
+        // Coverage Map / Automation Hints explicitly call for a "size
+        // comparison vs. the inline thumbnail" as the concrete, falsifiable
+        // proxy for "full size/zoom" -- previously only `toBeVisible()` was
+        // implemented, which can't distinguish "larger" from "identical" or
+        // "smaller." Comparing bounding boxes (not the AFS's own literal
+        // observed pixel values, e.g. "260x146" vs "500x400" -- those are
+        // this-run/this-viewport specific, not a portable contract) is the
+        // real, run-independent proof the modal image is genuinely enlarged
+        // relative to the thumbnail it was opened from.
+        const modalBox = await modalImage.boundingBox();
+        expect(thumbnailBox, 'thumbnail bounding box must be measurable before the preview opens').not.toBeNull();
+        expect(modalBox, 'preview modal image bounding box must be measurable').not.toBeNull();
+        expect(modalBox!.width, 'preview modal image should render wider than the inline thumbnail').toBeGreaterThan(
+          thumbnailBox!.width,
+        );
+        expect(modalBox!.height, 'preview modal image should render taller than the inline thumbnail').toBeGreaterThan(
+          thumbnailBox!.height,
+        );
         await expect(artifacts.previewModalDownloadButton()).toBeVisible();
         await expect(artifacts.previewModalRemoveButton()).toBeVisible();
         await expect(artifacts.previewModalCloseButton()).toBeVisible();
@@ -625,14 +714,14 @@ test.describe('@artifacts', () => {
         await artifacts.closePreviewModal();
 
         // Backdrop click -- confirmed working.
-        await artifacts.openThumbnailPreview('test-preview-image.png');
+        await artifacts.openThumbnailPreview('test-preview-image.png', messageText);
         await page.mouse.click(10, 10);
         await expect(artifacts.previewModal()).toHaveCount(0);
 
-        // ESC key -- genuine, filed, non-blocking product defect (GH#119).
-        // Asserts the documented-correct behavior (ESC closes the dialog),
-        // not weakened to match the current buggy behavior.
-        await artifacts.openThumbnailPreview('test-preview-image.png');
+        // Known defect: GH#119 -- ESC does not close the image preview
+        // modal. Asserts the documented-correct behavior (ESC closes the
+        // dialog), not weakened to match the current buggy behavior.
+        await artifacts.openThumbnailPreview('test-preview-image.png', messageText);
         await page.keyboard.press('Escape');
         await expect
           .soft(artifacts.previewModal(), 'Known defect: GH#119 (ESC key does not close the image preview modal)')
@@ -690,32 +779,59 @@ test.describe('@artifacts', () => {
 
       await test.step("8. Sent message shows text + attachment; assistant's reply corroborates first-frame-only processing", async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.messageThumbnail('test-animated.gif')).toBeVisible();
-        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.messageThumbnail('test-animated.gif', messageText)).toBeVisible();
+        // Post-merge review fix: a bare `toBeVisible()` only proves a reply
+        // container mounted, not that the model's own vision pipeline
+        // corroborates first-frame-only processing -- this AFS's own Axis 2
+        // addition explicitly calls for "a loose text-contains assertion
+        // (non-brittle: assert the reply mentions 'first frame' or similar,
+        // not an exact string)" as a secondary confirmation channel, since
+        // the fixture's own frames are labeled "Frame 1".."Frame 5"
+        // (`generate_test_images.py`) and this AFS's observed run quoted the
+        // reply verbatim: "The GIF appears to show the first frame only: a
+        // solid red background with the text 'Frame 1' centered."
+        await expect(artifacts.assistantReply(messageText)).toContainText(/first frame|frame 1/i, { timeout: 30_000 });
       });
 
       await test.step('9. Inline chat thumbnail is static, first-frame-only (PASSES -- pre-rasterized JPEG data URI, cannot animate)', async () => {
-        const src = await artifacts.messageThumbnail('test-animated.gif').getAttribute('src');
+        const src = await artifacts.messageThumbnail('test-animated.gif', messageText).getAttribute('src');
         expect(src).toMatch(/^data:image\/jpeg/);
       });
 
       await test.step('10-11. Chat-side preview modal: expected static first-frame-only (Known defect: GH#114)', async () => {
-        await artifacts.openThumbnailPreview('test-animated.gif');
+        await artifacts.openThumbnailPreview('test-animated.gif', messageText);
         const modalImg = artifacts.previewModal().getByRole('img', { name: 'test-animated.gif' });
         await expect(modalImg).toBeVisible();
-        const srcAtOpen = await modalImg.getAttribute('src');
-        // Two-screenshot(src)-apart technique -- the documented way to prove
+        // Post-merge review fix: an `<img src="blob:...">`'s `src` ATTRIBUTE
+        // does not mutate while the browser decodes and plays successive GIF
+        // frames internally -- a blob URL points at the same underlying
+        // Blob object regardless of which frame is currently rendered, so
+        // comparing `src` before/after a wait can never detect frame
+        // animation; this assertion was structurally incapable of failing
+        // regardless of whether the defect was present or fixed. The
+        // sibling Artifacts-bucket-panel check below (13-16) already proves
+        // out the correct technique for exactly this reason -- pixel-diffing
+        // via `.screenshot()`, which captures actually-rendered content, not
+        // a static DOM attribute. Applying the same technique here so this
+        // is a real, functioning assertion.
+        const shot1 = await modalImg.screenshot();
+        // Two-screenshot-apart technique -- the documented way to prove
         // animation vs. a static render from a static-assertion harness: a
         // single sample can't distinguish "static, showing frame N" from
         // "animating, caught mid-frame." This is a proven animation window
         // with no DOM-observable condition to wait FOR (the check's whole
-        // point is whether the src changes unprompted) -- the one
-        // documented exception to Hard Rule 5 (no sleeps).
+        // point is whether the rendered content changes unprompted) -- the
+        // one documented exception to Hard Rule 5 (no sleeps).
         await page.waitForTimeout(2_000);
-        const srcAfterDelay = await modalImg.getAttribute('src');
+        const shot2 = await modalImg.screenshot();
+        // Known defect: GH#114 -- the chat-side preview modal plays the full
+        // GIF animation instead of rendering first-frame-only.
         expect
-          .soft(srcAfterDelay, 'Known defect: GH#114 (chat-side preview modal plays full GIF animation instead of first-frame-only)')
-          .toBe(srcAtOpen);
+          .soft(
+            shot2.equals(shot1),
+            'Known defect: GH#114 (chat-side preview modal plays full GIF animation instead of first-frame-only)',
+          )
+          .toBe(true);
         await artifacts.closePreviewModal();
       });
 
@@ -735,6 +851,8 @@ test.describe('@artifacts', () => {
         // Same documented Hard-Rule-5 exception as step 10-11 above.
         await page.waitForTimeout(2_000);
         const shot2 = await previewImg.screenshot();
+        // Known defect: GH#114 -- the Artifacts bucket preview panel plays
+        // the full GIF animation instead of rendering first-frame-only.
         expect
           .soft(
             shot2.equals(shot1),
@@ -772,7 +890,25 @@ test.describe('@artifacts', () => {
       });
 
       await test.step('7. Message renders with the attachment thumbnail', async () => {
-        await expect(artifacts.messageThumbnail('test-download-image.png')).toBeVisible();
+        await expect(artifacts.messageThumbnail('test-download-image.png', messageText)).toBeVisible();
+      });
+
+      // Post-merge review fix: this test previously hovered/clicked Download
+      // immediately after the thumbnail rendered, with no wait for the
+      // assistant's reply -- despite two sibling doc comments elsewhere in
+      // this module (TC-034's and TC-037's own "root-caused" notes) already
+      // claiming "every other single-attachment test in this module
+      // (TC-030/034/035/036 or /037) already does this before its own next
+      // step." That claim was false for TC-036 specifically. Added for real
+      // now, both to make those sibling comments accurate and because the
+      // same underlying race they document -- the assistant's still-in-
+      // flight reply appending new content can trigger a broader message-
+      // list re-render that lands mid-interaction with the hover-revealed
+      // `.attachActionButtons` overlay this step's `downloadAttachmentImage()`
+      // depends on -- applies here too (Download and Remove attachment live
+      // in the identical overlay).
+      await test.step("Wait for the assistant's reply to finish before interacting with the hover-revealed action buttons (avoids racing an in-flight list re-render)", async () => {
+        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
       });
 
       let downloadedPath: string | null = null;
@@ -780,6 +916,11 @@ test.describe('@artifacts', () => {
         const download = await artifacts.downloadAttachmentImage('test-download-image.png');
         expect(download.suggestedFilename()).toBe('test-download-image.png');
         expect(download.url()).toMatch(/^blob:/);
+        // Post-merge review fix: this AFS's own Axis 2 addition explicitly
+        // calls for asserting `download.failure()` is `null` -- distinguishes
+        // a genuine client-side re-save (expected here, no server round
+        // trip) from a failed/retried network-backed download.
+        expect(await download.failure()).toBeNull();
         downloadedPath = await download.path();
         expect(downloadedPath).not.toBeNull();
       });
@@ -830,7 +971,7 @@ test.describe('@artifacts', () => {
 
       await test.step('7. Message row shows the sent text and the thumbnail', async () => {
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
-        await expect(artifacts.messageThumbnail('test-delete-target.png')).toBeVisible();
+        await expect(artifacts.messageThumbnail('test-delete-target.png', messageText)).toBeVisible();
       });
 
       // Root-caused during this debugging pass (not documented by the AFS,
@@ -898,7 +1039,7 @@ test.describe('@artifacts', () => {
         // state to catch up and re-render, which this shared, heavily-
         // loaded account has shown can lag past the default 5s elsewhere
         // in this module.
-        await expect(artifacts.messageThumbnail('test-delete-target.png')).toHaveCount(0, { timeout: 15_000 });
+        await expect(artifacts.messageThumbnail('test-delete-target.png', messageText)).toHaveCount(0, { timeout: 15_000 });
         await expect(artifacts.userMessageRow(messageText)).toContainText(messageText);
       });
 
@@ -1092,14 +1233,28 @@ test.describe('@artifacts', () => {
 
       await test.step("9-10. All 3 render as valid inline thumbnails; assistant's reply distinguishes all 3 individually", async () => {
         for (const fileName of fileNames) {
-          await expect(artifacts.messageThumbnail(fileName)).toBeVisible();
+          await expect(artifacts.messageThumbnail(fileName, messageText)).toBeVisible();
         }
-        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
+        // Post-merge review fix: a bare `toBeVisible()` only proves a reply
+        // container mounted, not that all 3 images were genuinely processed
+        // individually (vs. silently dropped or only-first-N accepted) --
+        // this AFS's own Axis 2 addition explicitly calls this out as "the
+        // strongest available proof all 3 attachments were genuinely
+        // processed server-side." The 3 fixtures each embed a distinct
+        // literal label (`generate_test_images.py`: "Batch 1"/"Batch 2"/
+        // "Batch 3" on blue/green/yellow backgrounds respectively), which
+        // this AFS's own observed run confirmed the reply named correctly --
+        // asserted as 3 independent substring checks (not a single exact-
+        // sentence match) so LLM wording variation doesn't make this brittle.
+        const reply = artifacts.assistantReply(messageText);
+        await expect(reply).toContainText(/Batch 1/i, { timeout: 30_000 });
+        await expect(reply).toContainText(/Batch 2/i);
+        await expect(reply).toContainText(/Batch 3/i);
       });
 
       await test.step('11. Each of the 3 thumbnails independently opens a preview lightbox (force-click required)', async () => {
         for (const fileName of fileNames) {
-          await artifacts.openThumbnailPreview(fileName);
+          await artifacts.openThumbnailPreview(fileName, messageText);
           await artifacts.closePreviewModal();
         }
       });
@@ -1193,12 +1348,23 @@ test.describe('@artifacts', () => {
       });
 
       await test.step("9. Message renders with the attachment thumbnail; assistant's reply describes the real content", async () => {
-        await expect(artifacts.messageThumbnail('test-drag-drop.png')).toBeVisible();
-        await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
+        await expect(artifacts.messageThumbnail('test-drag-drop.png', messageText)).toBeVisible();
+        // Post-merge review fix: a bare `toBeVisible()` only proves a reply
+        // container mounted, not that the model genuinely processed the
+        // dragged-and-dropped image -- this AFS's own Axis 2 addition
+        // explicitly calls for asserting the reply "demonstrably describes
+        // the image's real visual content ... strongest available proof the
+        // attachment was genuinely processed server-side" (same enrichment
+        // pattern as TC-032/TC-036). The fixture (`test-drag-drop.png`)
+        // renders the literal text "Drag Drop" on a purple background
+        // (`generate_test_images.py`) -- this AFS's own observed run quoted
+        // the reply verbatim: "...a purple background and the text 'Drag
+        // Drop' centered."
+        await expect(artifacts.assistantReply(messageText)).toContainText(/Drag Drop/i, { timeout: 30_000 });
       });
 
       await test.step('10. Thumbnail is clickable and opens a genuine preview dialog', async () => {
-        await artifacts.openThumbnailPreview('test-drag-drop.png');
+        await artifacts.openThumbnailPreview('test-drag-drop.png', messageText);
         await artifacts.closePreviewModal();
       });
 
@@ -1262,15 +1428,25 @@ test.describe('@artifacts', () => {
       });
 
       await test.step('11. Sent message shows a REAL rendered thumbnail (unlike the pre-send generic-icon chip, GH#121)', async () => {
-        await expect(artifacts.messageThumbnail(upload!.fileName)).toBeVisible();
+        await expect(artifacts.messageThumbnail(upload!.fileName, messageText)).toBeVisible();
       });
 
       await test.step("12. Assistant's reply demonstrably describes the pasted image's actual content", async () => {
-        await expect(artifacts.assistantReply(messageText)).toContainText(/\S/, { timeout: 30_000 });
+        // Post-merge review fix: a bare `/\S/` regex only proves SOME text
+        // arrived, not that the model genuinely read the pasted image via
+        // vision -- this AFS's own Axis 2 addition explicitly calls this out
+        // as "the strongest available proof the image was actually
+        // processed server-side via vision, not silently dropped" (same
+        // rationale as TC-032's AFS). The fixture (`test-paste.png`) renders
+        // the literal text "Paste" on a cyan background
+        // (`generate_test_images.py`) -- this AFS's own observed run quoted
+        // the reply verbatim: "...a cyan background with the word 'Paste'
+        // centered in white text."
+        await expect(artifacts.assistantReply(messageText)).toContainText(/Paste/i, { timeout: 30_000 });
       });
 
       await test.step('13. Thumbnail opens a full-size preview modal via a forced click (GH#117, reconfirmed for paste-produced attachments)', async () => {
-        await artifacts.openThumbnailPreview(upload!.fileName);
+        await artifacts.openThumbnailPreview(upload!.fileName, messageText);
         await expect(artifacts.previewModal()).toContainText(upload!.fileName);
         await artifacts.closePreviewModal();
       });
@@ -1313,7 +1489,7 @@ test.describe('@artifacts', () => {
           // needed to. Added both here.
           await page.goto(`${env.BASE_URL}/app/chat/${upload!.conversationId}`);
           await dismissAnnouncementBanner(page);
-          await expect(artifacts.messageThumbnail(upload!.fileName)).toBeVisible({ timeout: 30_000 });
+          await expect(artifacts.messageThumbnail(upload!.fileName, messageText)).toBeVisible({ timeout: 30_000 });
           const response = await artifacts.removeAttachmentFromChatMessage(true, upload!.fileName);
           expect(response.status()).toBe(204);
           expect(response.url()).toContain('keep_in_storage=0');
@@ -1373,15 +1549,15 @@ test.describe('@artifacts', () => {
 
       await test.step("10. Message renders exactly 10 thumbnails; assistant's reply acknowledges all 10", async () => {
         for (const fileName of fileNames) {
-          await expect(artifacts.messageThumbnail(fileName)).toBeVisible();
+          await expect(artifacts.messageThumbnail(fileName, messageText)).toBeVisible();
         }
         await expect(artifacts.assistantReply(messageText)).toContainText(/10/, { timeout: 30_000 });
       });
 
       await test.step('11. Two random thumbnails each independently open their own preview (force-click required)', async () => {
-        await artifacts.openThumbnailPreview(fileNames[0]);
+        await artifacts.openThumbnailPreview(fileNames[0], messageText);
         await artifacts.closePreviewModal();
-        await artifacts.openThumbnailPreview(fileNames[9]);
+        await artifacts.openThumbnailPreview(fileNames[9], messageText);
         await artifacts.closePreviewModal();
       });
 
@@ -1417,6 +1593,12 @@ test.describe('@artifacts', () => {
     const rejectedFileName = 'test-batch-11.png';
     const filePaths = [...retainedFileNames, rejectedFileName].map((f) => fixturePath(f));
     const messageText = uniqueMessage('Test batch upload of 11 images - expect rejection');
+    // Post-merge review fix: hoisted out of the inner block below (which is
+    // scoped to the outer `try`, not visible from the outer `finally`) so
+    // the teardown added there can reach them. See the outer `finally`'s own
+    // comment for why this AFS's original "no cleanup" call was overridden.
+    let projectId = '';
+    let uuid = '';
 
     try {
       await test.step('1-3. Navigate, dismiss banner, start a fresh isolated conversation', async () => {
@@ -1447,8 +1629,6 @@ test.describe('@artifacts', () => {
       });
 
       const uploads = trackAttachmentUploads(page);
-      let projectId = '';
-      let uuid = '';
       try {
         await test.step('6-7. Type message, send -- exactly 10 attachment POSTs fire, never 11', async () => {
           await artifacts.typeMessage(messageText);
@@ -1466,9 +1646,9 @@ test.describe('@artifacts', () => {
 
       await test.step('8-9. Sent message contains exactly 10 thumbnails, never the 11th; assistant reply renders', async () => {
         for (const fileName of retainedFileNames) {
-          await expect(artifacts.messageThumbnail(fileName)).toBeVisible();
+          await expect(artifacts.messageThumbnail(fileName, messageText)).toBeVisible();
         }
-        await expect(artifacts.messageThumbnail(rejectedFileName)).toHaveCount(0);
+        await expect(artifacts.messageThumbnail(rejectedFileName, messageText)).toHaveCount(0);
         await expect(artifacts.assistantReply(messageText)).toBeVisible({ timeout: 30_000 });
       });
 
@@ -1486,12 +1666,26 @@ test.describe('@artifacts', () => {
       });
     } finally {
       console_.stop();
-      // No cleanup -- this AFS's own explicit recommendation, matching the
-      // TC-001/TC-002 "chat history persists" precedent: the sent 10-image
-      // message is non-destructive, and TC-039/TC-042 (concurrently
-      // mutating the same shared account) already exercise the cleanup
-      // path for this module. An extra delete-after-test step here adds
-      // one more concurrent mutation for no correctness benefit.
+      // Post-merge review fix (AFS amendment -- see
+      // test-specs/artifacts/l3_upload-11-images-reject_TC-043.md's own
+      // Cleanup section): the AFS's original "no automated cleanup"
+      // recommendation followed the TC-001/TC-002/TC-032/TC-036/TC-038
+      // "chat history persists, non-destructive" precedent, reasoned
+      // specifically for a TEXT message. This case's own Behavior-B path
+      // additionally persists 10 real files in the shared Artifacts bucket
+      // on every run, with no compensating expiry -- unlike a bare chat
+      // message, that's a permanent per-run leak into shared, finite
+      // storage, not a merely-additive non-destructive record. Deleting
+      // them here, via the same authoritative-S3-listing-verified helper
+      // TC-042 already uses, closes that leak without reintroducing the
+      // concurrency concern the AFS was guarding against (TC-039/TC-042
+      // mutate their OWN distinct uuid folders concurrently; this delete
+      // only ever touches this run's own folder).
+      if (uuid && projectId) {
+        await test.step("Teardown: bulk-delete this run's own 10 retained files", async () => {
+          await deleteArtifactAndVerify(artifacts, 'attachments', projectId, uuid, retainedFileNames);
+        });
+      }
     }
   });
 });
