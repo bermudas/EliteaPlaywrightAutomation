@@ -1325,21 +1325,17 @@ test.describe('@artifacts', () => {
       await test.step('5-6. Drop the file -- preview chip renders with the filename', async () => {
         await dropDraggedFile(page, dragDataTransfer);
         await expect(artifacts.preSendChip('test-drag-drop.png')).toBeVisible();
-        // Known defect: GH#124 -- the ambient "Attach Files (N left)" counter
-        // does not decrement after a drag-and-drop attach, even with the
-        // single-continuous-gesture technique (see `dragOverComposer()`'s own
-        // doc comment for the DIFFERENT, already-fixed double-gesture issue
-        // this is not). Root-caused live (2026-07-03 debugging pass): the
-        // preceding `preSendChip` assertion (a hard assert, still enforced
-        // above) already proves the file genuinely attached -- this is a
-        // display-only desync isolated to the counter, confirmed via a full
-        // 5s re-poll returning the identical stale value 14 times (not a
-        // transient render lag). Soft-asserted so the rest of this test's
-        // real send/upload/persist flow -- unaffected by the stale label --
-        // still runs and gets verified.
-        await expect
-          .soft(artifacts.attachCounterText(), 'Known defect: GH#124 (drag-and-drop attach counter does not decrement)')
-          .toHaveAccessibleName(/9 left/);
+        // Was soft-asserted as "Known defect: GH#124" (counter stuck at
+        // "10 left" after a drag-and-drop attach, observed 2026-07-03).
+        // Re-verified 2026-07-09 in fresh contexts -- a from-first-principles
+        // probe (same single-gesture technique) AND this test itself both saw
+        // the counter decrement 10 -> 9 immediately after the drop. The
+        // 07-03 observation came from a debugging session whose page had
+        // already received experimental unbalanced drag gestures (the exact
+        // enter/leave-counter poisoning root-caused in `dragOverComposer()`'s
+        // doc comment) -- a state no real user can produce. GH#124 closed as
+        // not reproducible; hard assert restored.
+        await expect(artifacts.attachCounterText()).toHaveAccessibleName(/9 left/);
       });
 
       await test.step('7-8. Type the required message text and send', async () => {
