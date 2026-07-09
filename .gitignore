@@ -2,7 +2,7 @@
 claude.md
 agents.md
 .agents
-
+.DS_Store
 /smoke
 /Elitea-testing-WebQAPreExecuted
 .env
